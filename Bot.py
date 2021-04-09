@@ -2,11 +2,11 @@
 
 import os
 import discord
-from dotenv import load_dotenv
+#from dotenv import load_dotenv
 from Location_Data import *
 from Command_List import *
 
-load_dotenv()
+#load_dotenv()
 TOKEN = os.getenv('DISCORD_TOKEN')
 GUILD = int(os.getenv('GUILD_TOKEN'))
 
