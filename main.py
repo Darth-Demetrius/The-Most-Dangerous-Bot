@@ -220,7 +220,7 @@ async def roll(ctx, *args):
 			arg = arg[1].split('k')
 			die = int(arg[0])
 			if len(arg)<2: drop = 0
-			else: drop = arg[1]
+			else: drop = count - int(arg[1])
 
 			text = "Your roll is:"
 			rolls = roll_dice(die, (repeat, count))
