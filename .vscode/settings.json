@@ -1,0 +1,12 @@
+{
+    "python.terminal.activateEnvironment": true,
+    "editor.detectIndentation": false,
+    "editor.insertSpaces": true,
+    "python-envs.pythonProjects": [
+        {
+            "path": ".",
+            "envManager": "ms-python.python:system",
+            "packageManager": "ms-python.python:pip"
+        }
+    ]
+}

@@ -1,0 +1,19 @@
+{
+    "folders": [
+        {
+            "path": "."
+        }
+    ],
+    "settings": {
+        "chat.tools.terminal.autoApprove": {
+            "timeout": true,
+            "true": true,
+            "which": true
+        },
+        "terminal.integrated.shellIntegration.environmentReporting": true,
+        "launch": {
+            "configurations": [],
+            "compounds": []
+        }
+    }
+}

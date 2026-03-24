@@ -5,10 +5,9 @@ description = ""
 authors = ["DarthDemetrius <<>>"]
 
 [tool.poetry.dependencies]
-python = "^3.8"
-discord = "^1.0.1"
-replit = "^3.0.0"
-flask = "^1.1.2"
+python = ">=3.14.3"
+py-cord = ">=2.7.1"
+RestrictedPython = ">=7.4"
 
 [tool.poetry.dev-dependencies]
 

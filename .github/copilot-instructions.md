@@ -1,0 +1,46 @@
+# Copilot Workspace Instructions
+
+- Virtual environment:
+  - This workspace provides a Python virtual environment in .venv. Your editor automatically activates the workspace venv for terminals and tasks. Use the command `python` (not a hard-coded full path) for running scripts and tests while working in the activated workspace.
+  - If the command `python` does not work, try activating it with `source .venv/bin/activate`.
+  - Do not use full paths to the Python interpreter or any tools in the virtual environment.
+  - Prefer workspace-local tools and dependencies from `.venv`.
+- Documentation and code style:
+  - Follow the PEP 8 style guide for Python code.
+  - Write docstrings for all public functions and classes, using Google-style.
+  - Document any assumptions or decisions made during implementation in the code comments.
+  - Do not keep old documentation around after it has been changed. If you change the API, update the documentation to match. Do not keep the old documentation as a reference.
+- Changelog and README:
+  - Always keep the README and CHANGELOG up to date with any changes made to the codebase.
+  - Do not change the changelog history.
+  - Keep the changelog concise, if multiple changes are made to the same section, or with the same purpose, merge them into a single entry instead of adding multiple entries.
+- Versioning: Major.Minor.Patch
+  - Major version, 0 for development, incremented for breaking changes after stable release.
+  - Minor version, incremented for non-breaking feature additions and significant changes.
+  - Patch version, incremented for bug fixes and internal code changes.
+- Git:
+  - When prepping a release, update the changelog with the new version and date, and move any unreleased changes into the new version section.
+  - Use descriptive commit messages that explain the "what" and "why" of the change.
+  - While I am still in development, I will be making a lot of small commits, even just for refactors.
+  - Never mention updating the changelog, README, docs, or tests in the commit message, unless the commit is specifically about updating those things. If the commit includes code changes, just describe the code changes and not the documentation or tests, since those should be updated as part of the code change.
+  - Don't update the 'review needed' checklist in the README retroactively. I will always keep it up to date as I make changes, so there is no need to update it after the fact. Just keep it up to date as you make changes.
+- General coding practices:
+  - When writing or reviewing a helper function, consider whether it would actually improve readability or if it would just add unnecessary indirection. If it's the latter, just write the code inline.
+  - When making changes, also consider the impact on tests and documentation. Update tests to match the new behavior and update documentation to reflect any changes in the API or behavior of the code.
+  - Always run targeted tests related to the changed code to ensure that everything still works as expected after making changes.
+  - After completing changes, provide a summary of the changes made, including any new features, bug fixes, or refactors, and any relevant details about the implementation or design decisions.
+- Backwards compatibility:
+  - This project is still in development and has not been implemented yet, NEVER consider backwards compatibility when making changes.
+  - Allow changes to the API as needed.
+  - If you are concerned about breaking changes, just make the change and fix any breakages that occur. Do not add shims or aliases to preserve the old API.
+  - If you are _really_ concerned about breaking changes, you can add a comment in the code to explain the change and why it was made, but do not keep old code around as an alias or shim.
+  - NEVER create compatibility shims or aliases during development. If a change breaks something, just fix the breakage.
+  - NEVER add backward compatibility code. If you need to change a function signature, just change all the call sites. Do not keep the old function around as an alias or shim.
+  - Remember that this project is still in development and has not been released yet, so there is no need to preserve backwards compatibility. Just make the changes that are needed and fix any breakages that occur.
+- Testing:
+  - When writing tests, focus on testing the behavior of the code, not the implementation details.
+  - Do not write tests that are tightly coupled to the implementation, as they will break easily when the implementation changes. Instead, write tests that verify the expected behavior of the code, regardless of how it is implemented.
+  - For example, if you are testing a function that sorts a list, do not test the specific sorting algorithm used, but rather test that the output list is sorted correctly.
+  - If you are testing a function that interacts with an external API, do not test the specific API calls made, but rather test that the function behaves correctly given certain inputs and outputs from the API.
+  - When writing tests, also consider edge cases and error handling. Test how the code behaves with invalid inputs, unexpected conditions, and boundary cases.
+  - Always kill the bot after running tests, to ensure that there are no lingering processes or state that could affect subsequent tests or development work. Unless you are specifically testing something that requires the bot to be running, always kill the bot after running tests to ensure a clean slate for future work.
