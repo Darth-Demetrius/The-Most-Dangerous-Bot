@@ -11,9 +11,7 @@
   - Document any assumptions or decisions made during implementation in the code comments.
   - Do not keep old documentation around after it has been changed. If you change the API, update the documentation to match. Do not keep the old documentation as a reference.
 - Changelog and README:
-  - Always keep the README and CHANGELOG up to date with any changes made to the codebase.
-  - Do not change the changelog history.
-  - Keep the changelog concise, if multiple changes are made to the same section, or with the same purpose, merge them into a single entry instead of adding multiple entries.
+  - No changelog at the moment.
 - Versioning: Major.Minor.Patch
   - Major version, 0 for development, incremented for breaking changes after stable release.
   - Minor version, incremented for non-breaking feature additions and significant changes.

@@ -21,6 +21,7 @@ import os
 import sqlite3
 import pickle
 import time
+import logging
 from typing import Any
 
 _DB_PATH: str | None = None
@@ -42,6 +43,7 @@ def init_db(path: str | None = None) -> None:
     if path is None:
         path = os.path.join(os.getcwd(), "bot_data.db")
     _DB_PATH = path
+    print(f"Initializing database at {_DB_PATH}")
     _CONN = sqlite3.connect(_DB_PATH, check_same_thread=False)
     _CONN.execute(
         """
@@ -96,6 +98,7 @@ def save_session(guild_id: str | None, user_id: str, session: Any) -> None:
     conn, cursor = _get_conn()
     blob = pickle.dumps(session)
     ts = time.time()
+    print(f"Saving session for user={user_id} guild={guild_id} ({len(blob)} bytes)")
     # Use REPLACE to upsert the row for portability across SQLite versions.
     cursor.execute(
         "REPLACE INTO sessions(user_id, guild_id, data, updated) VALUES (?, ?, ?, ?)",
@@ -116,10 +119,14 @@ def load_session(guild_id: str | None, user_id: str) -> Any | None:
     )
     row = user_session.fetchone()
     if not row:
+        print(f"No saved session found for user={user_id} guild={guild_id}")
         return None
     try:
-        return pickle.loads(row[0])
+        result = pickle.loads(row[0])
+        print(f"Loaded session for user={user_id} guild={guild_id}")
+        return result
     except Exception:
+        logging.exception("Failed to unpickle session for user_id=%s guild_id=%s", user_id, guild_id)
         return None
 
 
@@ -131,6 +138,7 @@ def delete_session(guild_id: str | None, user_id: str) -> None:
     conn, cursor = _get_conn()
     cursor.execute("DELETE FROM sessions WHERE user_id = ? AND guild_id IS ?", (user_id, guild_id))
     conn.commit()
+    print(f"Deleted saved session for user={user_id} guild={guild_id}")
 
 
 def list_sessions() -> list[tuple[str, str | None]]:
@@ -185,6 +193,9 @@ def fetch_permission(guild_id: str | None, role_id: str | None = None) -> tuple[
     try:
         return pickle.loads(data), bool(can_save)
     except Exception:
+        logging.exception(
+            "Failed to unpickle guild permission for guild_id=%s role_id=%s", guild_id, role_id
+        )
         return None, False
 
 

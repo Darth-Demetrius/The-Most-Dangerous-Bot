@@ -1,13 +1,5 @@
 import asyncio
 
-# Ensure a default event loop exists on the main thread for libraries
-# that call asyncio.get_event_loop()/get_running_loop() at import time.
-try:
-    asyncio.get_running_loop()
-except RuntimeError:
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-
 import discord
 from discord.ext import commands
 import sys
@@ -21,6 +13,10 @@ if str(PROJECT_ROOT) not in sys.path:
 from dotenv import load_dotenv
 import logging
 import os
+from bot.logger import configure_process_logging
+
+
+handler = configure_process_logging(PROJECT_ROOT)
 
 load_dotenv()
 TOKEN = os.getenv('DISCORD_TOKEN') or ""
@@ -37,14 +33,11 @@ if _g_env:
 else:
     TEST_GUILD_IDS = None
 
-handler = logging.FileHandler(filename='discord.log', encoding='utf-8', mode='w')
-handler.setFormatter(logging.Formatter('%(asctime)s:%(levelname)s:%(name)s: %(message)s'))
-
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
 
-bot = commands.Bot(command_prefix='/', intents=intents)
+bot = commands.Bot(command_prefix='/', intents=intents, log_handler=handler, log_level=logging.INFO)
 
 cogs_list: list[str] = [
     "cogs.bot_repl",
@@ -52,22 +45,48 @@ cogs_list: list[str] = [
 ]
 
 TESTING = True  # Set to False to disable test guild command registration and related logging
+SHUTDOWN_REQUESTED = False
 
 
 async def main():
-    for cog in cogs_list:
-        bot.load_extension(cog)
+    global SHUTDOWN_REQUESTED
 
-    await bot.start(TOKEN)
+    if not TOKEN:
+        raise RuntimeError("DISCORD_TOKEN is missing")
+
+    SHUTDOWN_REQUESTED = False
+
+    for cog in cogs_list:
+        print(f"Loading cog: {cog}")
+        bot.load_extension(cog)
+        print(f"Loaded cog: {cog}")
+
+    print("Connecting to Discord...")
+    try:
+        await bot.start(TOKEN, reconnect=False)
+    except RuntimeError as exc:
+        # py-cord may raise this during normal /shutdown teardown while
+        # the websocket connect task is still unwinding.
+        if str(exc) == "Session is closed" and SHUTDOWN_REQUESTED:
+            return
+        raise
 
 
 @bot.event
 async def on_ready():
+    guild_names = ", ".join(f"{g.name} ({g.id})" for g in bot.guilds) or "(none)"
+    print(f"{bot.user} has connected to Discord")
+    print(f"  Guilds : {guild_names}")
+    print(f"  Latency: {bot.latency * 1000:.1f} ms")
     if not TESTING:
+        print("Syncing commands globally...")
         await bot.sync_commands()
+        print("Commands synced globally.")
     else:
+        guild_ids_str = ", ".join(str(g) for g in TEST_GUILD_IDS) if TEST_GUILD_IDS else "(all guilds)"
+        print(f"Syncing commands to test guilds: {guild_ids_str}")
         await bot.sync_commands(guild_ids=TEST_GUILD_IDS)
-    print(f'{bot.user} has connected to Discord')
+        print("Commands synced.")
 
 @bot.slash_command(
     name='shutdown',
@@ -75,15 +94,15 @@ async def on_ready():
 )
 #@commands.is_owner()
 async def shutdown(ctx: discord.ApplicationContext):
-    owner_user = ctx.author
-    if isinstance(owner_user, discord.Member):
-        owner_user = await bot.fetch_user(owner_user.id)
+    global SHUTDOWN_REQUESTED
 
-    if not await bot.is_owner(owner_user):
+    if not await bot.is_owner(ctx.author):
         await ctx.respond('Only the bot owner may use this command.', ephemeral=True)
         return
 
+    print(f"Shutdown requested by {ctx.author} ({ctx.author.id})")
     await ctx.respond('Shutting down...')
+    SHUTDOWN_REQUESTED = True
     await bot.close()
 
 
