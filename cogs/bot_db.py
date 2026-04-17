@@ -15,6 +15,7 @@ Public functions:
  - `list_guild_permissions(guild_id=None)` to list stored guild/role permissions
 """
 from __future__ import annotations
+import discord
 from discord.ext import commands
 
 import os
@@ -22,7 +23,11 @@ import sqlite3
 import pickle
 import time
 import logging
+from collections.abc import Iterable
 from typing import Any
+
+from respy_repl import Permissions
+from defines.user_session import UserSession
 
 _DB_PATH: str | None = None
 _CONN: sqlite3.Connection | None = None
@@ -90,7 +95,7 @@ def _get_conn() -> tuple[sqlite3.Connection, sqlite3.Cursor]:
     return _CONN, _CONN.cursor()
 
 
-def save_session(guild_id: str | None, user_id: str, session: Any) -> None:
+def save_session(user_id: int, guild_id: int | None, session: Any) -> None:
     """Persist a Python object as the saved session for `user_id` in `guild_id`.
 
     This uses pickle to serialize `session` into the database.
@@ -107,7 +112,7 @@ def save_session(guild_id: str | None, user_id: str, session: Any) -> None:
     conn.commit()
 
 
-def load_session(guild_id: str | None, user_id: str) -> Any | None:
+def load_session(user_id: int, guild_id: int | None = None) -> UserSession | None:
     """Load and return the saved session for `user_id` in `guild_id`, or None if missing.
 
     If `guild_id` is None this will load the session with a NULL guild_id (aka dm).
@@ -130,7 +135,7 @@ def load_session(guild_id: str | None, user_id: str) -> Any | None:
         return None
 
 
-def delete_session(guild_id: str | None, user_id: str) -> None:
+def delete_session(user_id: str, guild_id: str | None) -> None:
     """Delete the saved session for `user_id` in `guild_id` if it exists.
 
     If `guild_id` is None this will delete the NULL-guild row (aka dm).
@@ -149,10 +154,12 @@ def list_sessions() -> list[tuple[str, str | None]]:
 
 
 def save_permissions(
-    guild_id: str | None,
-    role_id: str | None = None,
-    perms: Any = 0,
-    can_save: bool = False
+    guild_id: int | None,
+    role_id: int | None = None,
+    perms: Permissions | None = None,
+    can_save: bool = False,
+    *,
+    imports: str | None = None,
 ) -> None:
     """
     Persist a Permissions (or PermissionLevel) object for a guild/role.
@@ -173,52 +180,58 @@ def save_permissions(
     conn.commit()
 
 
-def fetch_permission(guild_id: str | None, role_id: str | None = None) -> tuple[Any | None, bool]:
+def fetch_permission(
+    guild_id: int | None,
+    role_id: list[int] = []
+) -> list[tuple[Permissions | None, bool]]:
     """Load persisted permissions for a guild/role, or None if missing.
 
     If `guild_id` is None, role_id will act as user_id for a DM permission entry.
     If `role_id` is None, will set `role_id` to `guild_id` (@everyone role).
     """
-    if role_id is None:
-        role_id = guild_id
+    if guild_id is None and not role_id:
+        raise ValueError("Must specify at least guild_id or role_id to fetch a permission entry.")
+    if not role_id:
+        role_id = [guild_id] #  type: ignore[list-item]
+
     conn, cursor = _get_conn()
     cursor.execute(
-        "SELECT data, can_save FROM guild_permissions WHERE guild_id IS ? AND role_id IS ?",
-        (guild_id, role_id),
+        "SELECT role_id, data, can_save FROM guild_permissions WHERE guild_id IS ?",
+        (guild_id,),
     )
-    row = cursor.fetchone()
-    if not row:
-        return None, False
-    data, can_save = row
-    try:
-        return pickle.loads(data), bool(can_save)
-    except Exception:
-        logging.exception(
-            "Failed to unpickle guild permission for guild_id=%s role_id=%s", guild_id, role_id
-        )
-        return None, False
+
+    perms: list[tuple[Permissions | None, bool]] = []
+    for row in cursor:
+        r_id, data, can_save = row
+        if int(r_id) in role_id:
+            try:
+                perms.append((pickle.loads(data), bool(can_save)))
+            except Exception:
+                logging.exception(
+                    "Failed to unpickle guild permission for guild_id=%s role_id=%s", guild_id, r_id
+                )
+    return perms or [(None, False)]
 
 
 def fetch_user_guild_permissions(
-    guild_id: str,
-    user_role_ids: list[str]
-) -> tuple[list[Any], bool]:
+    ctx: discord.ApplicationContext
+) -> tuple[Permissions, bool]:
     """Fetch and merge permissions for a user based on their guild roles.
 
     This will fetch permissions for each role in `user_role_ids` and merge them together.
     If `guild_id` is None, this will look for DM permission entries with role_id=user_id.
     """
-    user_perms = []
-    can_save = False
-    for role_id in user_role_ids:
-        role_perms, role_can_save = fetch_permission(guild_id, role_id)
-        if role_perms is not None:
-            user_perms.append(role_perms)
-            can_save |= role_can_save
-    return user_perms, can_save
+    if ctx.guild_id:
+        user_role_ids = [role.id for role in ctx.author.roles]  # type: ignore[attr-defined]
+    else:
+        user_role_ids = [ctx.author.id]
+
+    perms_list, can_save_list = zip(*fetch_permission(ctx.guild_id, user_role_ids))
+
+    return Permissions.permissive_merge(*perms_list), any(can_save_list)
 
 
-def delete_permissions(guild_id: str | None, role_id: str | None = None) -> None:
+def delete_permissions(guild_id: int | None, role_id: int | None = None) -> None:
     """Delete a guild/role permission entry. If `role_id` is None delete all for guild.
     
     If `guild_id` is None, role_id will act as user_id for a DM permission entry.
@@ -234,18 +247,17 @@ def delete_permissions(guild_id: str | None, role_id: str | None = None) -> None
     conn.commit()
 
 
-def list_permissions(guild_id: str | None = ...) -> list[tuple[str, str]]:  # type: ignore[assignment]
-    """Return list of `(guild_id, role_id)` tuples for stored permissions.
+def list_permissions(guild_id: int | None = None) -> list[tuple[int, int, Permissions, bool, float]]:
+    """Return list of `(guild_id, role_id, data, can_save)` tuples for stored permissions.
 
     If `guild_id` is provided, only returns entries for that guild.
     If `guild_id` is None, role_id will act as user_id for a DM permission entry.
     """
     conn, cursor = _get_conn()
-    if guild_id is ...:
-        cur = cursor.execute("SELECT guild_id, role_id FROM guild_permissions")
-    else:
-        cur = cursor.execute("SELECT guild_id, role_id FROM guild_permissions WHERE guild_id IS ?", (guild_id,))
-    return [(r[0], r[1]) for r in cur.fetchall()]
+    cur = cursor.execute("SELECT guild_id, role_id, data, can_save, updated FROM guild_permissions WHERE guild_id IS ?", (guild_id,))
+    entries = [(row[0], row[1], pickle.loads(row[2]), bool(row[3]), row[4]) for row in cur.fetchall()]
+    return entries
+
 
 
 def setup(bot: commands.Bot) -> None:

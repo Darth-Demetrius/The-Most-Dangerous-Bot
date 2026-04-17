@@ -1,4 +1,6 @@
 import asyncio
+import inspect
+import signal
 
 import discord
 from discord.ext import commands
@@ -46,6 +48,46 @@ cogs_list: list[str] = [
 
 TESTING = True  # Set to False to disable test guild command registration and related logging
 SHUTDOWN_REQUESTED = False
+SHUTDOWN_TASK: asyncio.Task[None] | None = None
+
+
+async def _run_shutdown_hooks() -> None:
+    for cog_name, cog in bot.cogs.items():
+        hook = getattr(cog, "graceful_shutdown", None)
+        if hook is None:
+            continue
+
+        print(f"Running graceful shutdown hook for cog: {cog_name}")
+        try:
+            result = hook()
+            if inspect.isawaitable(result):
+                await result
+        except Exception:
+            logging.exception("Shutdown hook failed for cog=%s", cog_name)
+
+
+async def request_shutdown(reason: str) -> None:
+    global SHUTDOWN_REQUESTED
+
+    if SHUTDOWN_REQUESTED:
+        return
+
+    SHUTDOWN_REQUESTED = True
+    print(f"Graceful shutdown requested: {reason}")
+
+    try:
+        await _run_shutdown_hooks()
+    finally:
+        if not bot.is_closed():
+            await bot.close()
+
+
+def schedule_shutdown(reason: str) -> asyncio.Task[None]:
+    global SHUTDOWN_TASK
+
+    if SHUTDOWN_TASK is None or SHUTDOWN_TASK.done():
+        SHUTDOWN_TASK = asyncio.create_task(request_shutdown(reason))
+    return SHUTDOWN_TASK
 
 
 async def main():
@@ -55,6 +97,16 @@ async def main():
         raise RuntimeError("DISCORD_TOKEN is missing")
 
     SHUTDOWN_REQUESTED = False
+
+    loop = asyncio.get_running_loop()
+    for shutdown_signal in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(
+                shutdown_signal,
+                lambda sig=shutdown_signal: schedule_shutdown(f"received {sig.name}"),
+            )
+        except NotImplementedError:
+            pass
 
     for cog in cogs_list:
         print(f"Loading cog: {cog}")
@@ -91,19 +143,17 @@ async def on_ready():
 @bot.slash_command(
     name='shutdown',
     description='Shut down the bot (owner only)',
+    default_member_permissions=discord.Permissions(administrator=True),
 )
 #@commands.is_owner()
 async def shutdown(ctx: discord.ApplicationContext):
-    global SHUTDOWN_REQUESTED
-
     if not await bot.is_owner(ctx.author):
         await ctx.respond('Only the bot owner may use this command.', ephemeral=True)
         return
 
     print(f"Shutdown requested by {ctx.author} ({ctx.author.id})")
     await ctx.respond('Shutting down...')
-    SHUTDOWN_REQUESTED = True
-    await bot.close()
+    await schedule_shutdown(f"slash command by {ctx.author} ({ctx.author.id})")
 
 
 def get_id(obj, id_type: str = "") -> str:
