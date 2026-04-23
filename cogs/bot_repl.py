@@ -41,7 +41,7 @@ d4, d6, d8, d10, d12, d20, and d100 are initialized by default as dyce.H(sides) 
 > 
 > h_4d6_k3 = (4@P(d6)).h(-1,-2,-3)  # define 4d6k3
 > print(h_4d6_k3.format())  # show the distribution for 4d6k3
-> stat_block = 6@P(h_4d6_k3)  # create a D&D 5e stat block of 6 4d6k3 rolls (i.e. standard array)
+> stat_block = 6@P(h_4d6_k3)  # create a D&D 5e stat block of 6 4d6k3 rolls
 > sorted(stat_block.roll())  # roll a standard array
 > print(stat_block.h(0).format())  # distribution for lowest stat in the block
 > print(stat_block.h(-1).format())  # distribution for highest stat in the block
@@ -154,11 +154,17 @@ class REPLCog(commands.Cog):
         description="Initialize d4, d6, d8, d10, d12, d20, and d100 variables in the REPL session",
         required=False,
     )
+    @discord.option(
+        "show_instructions",
+        description="Show coding instructions after opening the REPL session",
+        required=False,
+    )
     async def open_repl_command(
         self,
         ctx: discord.ApplicationContext,
         new: bool = False,
-        init_dice_vars: bool = True
+        init_dice_vars: bool = True,
+        show_instructions: bool = False,
     ) -> None:
         """
         Open a REPL for the caller.
@@ -170,6 +176,9 @@ class REPLCog(commands.Cog):
         init_dice_vars (optional, default True):
             - True: initialize d4, d6, d8, d10, d12, d20, and d100 variables as MyDyce.H(sides) objects for convenient use in the REPL
             - False: do not initialize these variables
+        show_instructions (optional, default False):
+            - True: show coding instructions after opening the REPL session
+            - False: do not show coding instructions
         """
         _made = ""
         id_tuple = (ctx.author.id, ctx.guild_id)
@@ -200,6 +209,16 @@ class REPLCog(commands.Cog):
 
         print(f"{_made} REPL session opened for {ctx.author}{f' in guild {ctx.guild}' if ctx.guild else ''} [perms={user_session.perms}, can_save={user_session.can_save}]")
         await ctx.respond(f'{_made} REPL session started.', ephemeral=True)
+        if show_instructions:
+            await ctx.respond(CODING_INSTRUCTIONS, ephemeral=True)
+
+
+    @repl.command(
+        name='instructions',
+        description='Show the REPL coding instructions'
+    )
+    async def show_coding_instructions(self, ctx: discord.ApplicationContext) -> None:
+        """Show the REPL coding instructions for the caller."""
         await ctx.respond(CODING_INSTRUCTIONS, ephemeral=True)
 
 
@@ -263,7 +282,7 @@ class REPLCog(commands.Cog):
     )
     @discord.option(
         "permission_level",
-        description="The permission level to set (0-5, higher is more permissive)",
+        description="The permission level to set (0-3, higher is more permissive)",
         required=True,
     )
     @discord.option(
@@ -284,12 +303,12 @@ class REPLCog(commands.Cog):
             await ctx.respond('Only the bot owner may use this command.', ephemeral=True)
             return
 
-        if permission_level < 0 or permission_level > 5:
-            await ctx.respond('Permission level must be between 0 and 5.', ephemeral=True)
+        if permission_level < 0 or permission_level > 3:
+            await ctx.respond('Permission level must be between 0 and 3.', ephemeral=True)
             return
 
         if can_save is None:
-            can_save = permission_level >= 3
+            can_save = permission_level >= 2
         save_permissions(
             ctx.guild_id,
             guild_role.id if ctx.guild_id else ctx.author.id,

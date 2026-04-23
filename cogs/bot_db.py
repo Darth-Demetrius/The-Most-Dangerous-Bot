@@ -128,6 +128,8 @@ def load_session(user_id: int, guild_id: int | None = None) -> UserSession | Non
         return None
     try:
         result = pickle.loads(row[0])
+        result.user_id = user_id
+        result.guild_id = guild_id
         print(f"Loaded session for user={user_id} guild={guild_id}")
         return result
     except Exception:
