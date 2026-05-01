@@ -49,6 +49,22 @@ cogs_list: list[str] = [
 TESTING = True  # Set to False to disable test guild command registration and related logging
 SHUTDOWN_REQUESTED = False
 SHUTDOWN_TASK: asyncio.Task[None] | None = None
+HELP_TEXT = "\n".join(
+    [
+        "Available commands:",
+        "/help - Show this message.",
+        "/repl open - Open a Python REPL session.",
+        "/repl instructions - Show REPL coding instructions.",
+        "/repl close - Close your current REPL session.",
+        "/repl vars - List variables in your active or saved REPL session.",
+        "/repl perms - Show your effective REPL permission level.",
+        "/repl session_imports - Show the imports currently enabled for your REPL session.",
+        "/repl possible_imports - Show the imports allowed by the REPL policy at your permission level.",
+        "/repl list_perms - List stored REPL permissions for this guild or DM.",
+        "/repl set_perms - Set REPL permissions for a guild role (bot owner only).",
+        "/shutdown - Shut down the bot (owner only).",
+    ]
+)
 
 
 async def _run_shutdown_hooks() -> None:
@@ -139,6 +155,15 @@ async def on_ready():
         print(f"Syncing commands to test guilds: {guild_ids_str}")
         await bot.sync_commands(guild_ids=TEST_GUILD_IDS)
         print("Commands synced.")
+
+
+@bot.slash_command(
+    name='help',
+    description='Show the available bot commands',
+)
+async def help_command(ctx: discord.ApplicationContext):
+    """Show the currently available bot commands."""
+    await ctx.respond(HELP_TEXT, ephemeral=True)
 
 @bot.slash_command(
     name='shutdown',

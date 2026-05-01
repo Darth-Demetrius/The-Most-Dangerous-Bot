@@ -9,6 +9,7 @@ import logging
 from urllib.parse import quote
 
 from respy_repl import Permissions
+from respy_repl.imports_policy_tables import DEFAULT_IMPORTS_ALLOW, DEFAULT_IMPORTS_BLOCK
 from .bot_db import (
     save_session,
     load_session,
@@ -53,6 +54,42 @@ d4, d6, d8, d10, d12, d20, and d100 are initialized by default as dyce.H(sides) 
 DEFAULT_USER_PERMISSION_LEVEL = 3
 
 IDTuple = tuple[int, int | None]  # (user_id, guild_id)
+
+IMPORT_POLICY_CATEGORIES: list[tuple[str, set[str]]] = [
+    (
+        "Core Python: Data Types",
+        {
+            "datetime",
+            "zoneinfo",
+            "calendar",
+            "collections",
+            "collections.abc",
+            "heapq",
+            "bisect",
+            "array",
+            "weakref",
+            "types",
+            "copy",
+            "pprint",
+            "reprlib",
+            "enum",
+            "graphlib",
+        },
+    ),
+    (
+        "Core Python: Numeric and Mathematical",
+        {"numbers", "math", "cmath", "decimal", "fractions", "random", "statistics"},
+    ),
+    (
+        "Core Python: Functional Programming",
+        {"itertools", "functools", "operator"},
+    ),
+    (
+        "Core Python: Internet Data / Multimedia / i18n",
+        {"json", "wave", "colorsys", "gettext", "locale"},
+    ),
+    ("Third-party", {"numpy", "matplotlib", "scipy", "sympy", "MyDyce"}),
+]
 
 class REPLCog(commands.Cog):
     """Cog containing REPL-related commands."""
@@ -269,6 +306,90 @@ class REPLCog(commands.Cog):
         base = getattr(perms, 'base_perms', None)
         base_str = str(base) if base is not None else repr(perms)
         await ctx.respond(f'Permission level: {base_str}\nCan save sessions: {can_save}', ephemeral=True)
+
+
+    @repl.command(
+        name='session_imports',
+        description='Show the imports currently enabled for your REPL session'
+    )
+    async def show_session_imports(self, ctx: discord.ApplicationContext) -> None:
+        """Respond with the imports currently enabled for the caller's REPL session."""
+        perms, _can_save = fetch_user_guild_permissions(ctx)
+        if perms is None:
+            await ctx.respond('You do not have permission to use the REPL.', ephemeral=True)
+            return
+
+        imports = getattr(perms, "imports", None)
+        if not imports:
+            await ctx.respond('No imports are available.', ephemeral=True)
+            return
+
+        modules = {module_name for module_name, _alias in imports}
+        sections: list[str] = []
+        for category_name, category_modules in IMPORT_POLICY_CATEGORIES:
+            category_list = sorted(modules & category_modules)
+            if category_list:
+                sections.append(f"{category_name}\n> {', '.join(category_list)}")
+                modules -= category_modules
+
+        if modules:
+            sections.append(f"Other\n> {', '.join(sorted(modules))}")
+
+        await ctx.respond("Imports enabled for this session:\n\n" + "\n\n".join(sections), ephemeral=True)
+
+
+    @repl.command(
+        name='possible_imports',
+        description='Show the imports allowed by the REPL policy at your permission level'
+    )
+    async def show_possible_imports(self, ctx: discord.ApplicationContext) -> None:
+        """Respond with policy-allowed imports for the caller's current permission level."""
+        perms, _can_save = fetch_user_guild_permissions(ctx)
+        if perms is None:
+            await ctx.respond('You do not have permission to use the REPL.', ephemeral=True)
+            return
+
+        level = getattr(perms, '_level', None)
+        if level is None:
+            await ctx.respond('Could not determine your REPL permission level.', ephemeral=True)
+            return
+
+        max_level = int(level)
+        modules: set[str] = set()
+        for module_name in sorted(DEFAULT_IMPORTS_ALLOW):
+            allowed_rules = DEFAULT_IMPORTS_ALLOW[module_name]
+            allowed_symbols = set().union(
+                *(symbols for rule_level, symbols in allowed_rules.items() if rule_level <= max_level)
+            )
+            if not allowed_symbols:
+                continue
+
+            blocked_rules = DEFAULT_IMPORTS_BLOCK.get(module_name, {})
+            blocked_symbols = set().union(
+                *(symbols for rule_level, symbols in blocked_rules.items() if rule_level <= max_level)
+            )
+
+            if '*' in allowed_symbols or any(symbol not in blocked_symbols for symbol in allowed_symbols):
+                modules.add(module_name)
+
+        sections: list[str] = []
+        for category_name, category_modules in IMPORT_POLICY_CATEGORIES:
+            category_list = sorted(modules & category_modules)
+            if category_list:
+                sections.append(f"{category_name}\n> {', '.join(category_list)}")
+                modules -= category_modules
+
+        if modules:
+            sections.append(f"Other\n> {', '.join(sorted(modules))}")
+
+        if not sections:
+            await ctx.respond('No policy imports are available at your current permission level.', ephemeral=True)
+            return
+
+        await ctx.respond(
+            f"Imports allowed by the REPL policy at level {max_level}:\n\n" + "\n\n".join(sections),
+            ephemeral=True,
+        )
 
 
     @repl.command(
