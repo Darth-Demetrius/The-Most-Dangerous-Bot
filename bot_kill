@@ -1,0 +1,4 @@
+#!/bin/sh
+
+systemctl --user stop the-most-dangerous-bot.service
+echo "Bot stopped."

@@ -1,54 +1,39 @@
-"""Simple SQLite-backed DB helpers for bot data (REPL sessions).
+"""SQLite-backed persistence helpers for REPL sessions and permissions.
 
-This module stores Python objects as pickled blobs in SQLite. Use only
-for trusted data: unpickling arbitrary data is unsafe.
-
-Public functions:
-- `init_db(path)` to initialize the database file
-- `save_session(user_id, session)` to persist a session
-- `load_session(user_id)` to restore a session
-- `delete_session(user_id)` to remove a persisted session
-- `list_sessions()` to list saved user ids
- - `save_guild_permission(guild_id, role_id, perms)` to persist per-guild role permissions
- - `load_guild_permission(guild_id, role_id)` to restore per-guild role permissions
- - `delete_guild_permission(guild_id, role_id=None)` to remove per-guild role permissions
- - `list_guild_permissions(guild_id=None)` to list stored guild/role permissions
+The module stores Python objects as pickled blobs in SQLite. That is only
+safe for trusted data.
 """
-from __future__ import annotations
-import discord
-from discord.ext import commands
 
-import os
-import sqlite3
-import pickle
-import time
+from __future__ import annotations
+
 import logging
+import os
+import pickle
+import sqlite3
+import time
 from collections.abc import Iterable
 from typing import Any
 
-from respy_repl import Permissions
+import discord
+from discord.ext import commands
+
 from defines.user_session import UserSession
+from respy_repl import Permissions
 
 _DB_PATH: str | None = None
 _CONN: sqlite3.Connection | None = None
 
-class DBCog(commands.Cog):
-    def __init__(self, bot: commands.Bot):
-        self.bot = bot
 
 
 def init_db(path: str | None = None) -> None:
-    """Initialize the SQLite database and create required tables.
-
-    Args:
-        path: Path to the SQLite database file. Defaults to
-            ./bot_data.db in the current working directory.
-    """
+    """Initialize the SQLite database and create required tables."""
     global _DB_PATH, _CONN
+
     if path is None:
         path = os.path.join(os.getcwd(), "bot_data.db")
+
     _DB_PATH = path
-    print(f"Initializing database at {_DB_PATH}")
+    print(f"Initializing REPL database at: {_DB_PATH}")
     _CONN = sqlite3.connect(_DB_PATH, check_same_thread=False)
     _CONN.execute(
         """
@@ -63,7 +48,6 @@ def init_db(path: str | None = None) -> None:
     )
     _CONN.commit()
 
-    # Ensure guild_permissions table exists for per-guild/role permission storage
     _CONN.execute(
         """
         CREATE TABLE IF NOT EXISTS guild_permissions (
@@ -78,7 +62,6 @@ def init_db(path: str | None = None) -> None:
     )
     _CONN.commit()
 
-    # Migrate older DBs that predate the `can_save` column.
     cols = [row[1] for row in _CONN.execute("PRAGMA table_info(guild_permissions)").fetchall()]
     if "can_save" not in cols:
         _CONN.execute(
@@ -95,16 +78,26 @@ def _get_conn() -> tuple[sqlite3.Connection, sqlite3.Cursor]:
     return _CONN, _CONN.cursor()
 
 
-def save_session(user_id: int, guild_id: int | None, session: Any) -> None:
-    """Persist a Python object as the saved session for `user_id` in `guild_id`.
+#def _encode_permission_scope(guild_id: int | None) -> int:
+#    """Map DM scope to a stable non-Discord sentinel for storage."""
+#    return DM_PERMISSION_SCOPE_ID if guild_id is None else guild_id
 
-    This uses pickle to serialize `session` into the database.
-    """
+
+#def _decode_permission_scope(stored_guild_id: int | str | None) -> int | None:
+#    """Decode stored guild scope back into a guild ID or DM scope."""
+#    if stored_guild_id is None:
+#        return None
+#
+#    guild_id = int(stored_guild_id)
+#    return None if guild_id == DM_PERMISSION_SCOPE_ID else guild_id
+
+
+def save_repl_session(user_id: int, guild_id: int | None, session: Any) -> None:
+    """Persist a REPL session for a user and optional guild."""
     conn, cursor = _get_conn()
     blob = pickle.dumps(session)
     ts = time.time()
-    print(f"Saving session for user={user_id} guild={guild_id} ({len(blob)} bytes)")
-    # Use REPLACE to upsert the row for portability across SQLite versions.
+    print(f"Saving REPL session for user ID {user_id}, guild ID {guild_id} ({len(blob)} bytes)")
     cursor.execute(
         "REPLACE INTO sessions(user_id, guild_id, data, updated) VALUES (?, ?, ?, ?)",
         (user_id, guild_id, blob, ts),
@@ -112,68 +105,87 @@ def save_session(user_id: int, guild_id: int | None, session: Any) -> None:
     conn.commit()
 
 
-def load_session(user_id: int, guild_id: int | None = None) -> UserSession | None:
-    """Load and return the saved session for `user_id` in `guild_id`, or None if missing.
-
-    If `guild_id` is None this will load the session with a NULL guild_id (aka dm).
-    """
+def load_repl_session(user_id: int, guild_id: int | None = None) -> UserSession | None:
+    """Load a saved REPL session for a user and optional guild."""
     conn, cursor = _get_conn()
-    user_session = cursor.execute(
+    row = cursor.execute(
         "SELECT data FROM sessions WHERE user_id = ? AND guild_id IS ?",
         (user_id, guild_id),
-    )
-    row = user_session.fetchone()
+    ).fetchone()
     if not row:
-        print(f"No saved session found for user={user_id} guild={guild_id}")
+        scope = f"guild ID {guild_id}" if guild_id is not None else "DM"
+        print(f"No saved REPL session found for user ID {user_id} in {scope}")
         return None
+
     try:
-        result = pickle.loads(row[0])
-        result.user_id = user_id
-        result.guild_id = guild_id
-        print(f"Loaded session for user={user_id} guild={guild_id}")
-        return result
+        session = pickle.loads(row[0])
+        session.user_id = user_id
+        session.guild_id = guild_id
+        scope = f"guild ID {guild_id}" if guild_id is not None else "DM"
+        print(f"Loaded REPL session for user ID {user_id} in {scope}")
+        return session
     except Exception:
-        logging.exception("Failed to unpickle session for user_id=%s guild_id=%s", user_id, guild_id)
+        scope = f"guild ID {guild_id}" if guild_id is not None else "DM"
+        logging.exception(
+            "Failed to unpickle REPL session for user ID %s in %s",
+            user_id,
+            scope,
+        )
         return None
 
 
-def delete_session(user_id: str, guild_id: str | None) -> None:
-    """Delete the saved session for `user_id` in `guild_id` if it exists.
-
-    If `guild_id` is None this will delete the NULL-guild row (aka dm).
-    """
+def delete_repl_session(user_id: int, guild_id: int | None) -> None:
+    """Delete a saved REPL session for a user and optional guild."""
     conn, cursor = _get_conn()
-    cursor.execute("DELETE FROM sessions WHERE user_id = ? AND guild_id IS ?", (user_id, guild_id))
+    cursor.execute(
+        "DELETE FROM sessions WHERE user_id = ? AND guild_id IS ?",
+        (user_id, guild_id),
+    )
     conn.commit()
-    print(f"Deleted saved session for user={user_id} guild={guild_id}")
+    scope = f"guild ID {guild_id}" if guild_id is not None else "DM"
+    print(f"Deleted saved REPL session for user ID {user_id} in {scope}")
 
 
-def list_sessions() -> list[tuple[str, str | None]]:
-    """Return a list of tuples `(user_id, guild_id)` for saved sessions."""
+def list_repl_sessions(
+    guild_id: int | None = None,
+    *,
+    include_all_scopes: bool = False,
+) -> list[tuple[int, int | None, float]]:
+    """List saved REPL sessions for one scope or for all scopes."""
     conn, cursor = _get_conn()
-    sessions = cursor.execute("SELECT user_id, guild_id FROM sessions")
-    return [(row[0], row[1]) for row in sessions.fetchall()]
+    if include_all_scopes:
+        rows = cursor.execute(
+            "SELECT user_id, guild_id, updated FROM sessions ORDER BY updated DESC"
+        ).fetchall()
+    else:
+        rows = cursor.execute(
+            "SELECT user_id, guild_id, updated FROM sessions WHERE guild_id IS ? ORDER BY updated DESC",
+            (guild_id,),
+        ).fetchall()
+
+    return [
+        (
+            int(row[0]),
+            row[1] if row[1] is None else int(row[1]),
+            float(row[2]),
+        )
+        for row in rows
+    ]
 
 
-def save_permissions(
+def save_repl_permissions(
     guild_id: int | None,
     role_id: int | None = None,
-    perms: Permissions | None = None,
+    permissions: Permissions | None = None,
     can_save: bool = False,
-    *,
-    imports: str | None = None,
 ) -> None:
-    """
-    Persist a Permissions (or PermissionLevel) object for a guild/role.
-    
-    If `guild_id` is None, role_id will act as user_id for a DM permission entry.
-    If `role_id` is None, will set `role_id` to `guild_id` (@everyone role) for a guild default entry.
-    If both `guild_id` and `role_id` are None, will store a global default entry.
-    """
+    """Persist REPL permissions for a guild role or DM user."""
+    # stored_guild_id = _encode_permission_scope(guild_id)
     if role_id is None:
         role_id = guild_id
+
     conn, cursor = _get_conn()
-    blob = pickle.dumps(perms)
+    blob = pickle.dumps(permissions)
     ts = time.time()
     cursor.execute(
         "REPLACE INTO guild_permissions(guild_id, role_id, data, can_save, updated) VALUES (?, ?, ?, ?, ?)",
@@ -182,88 +194,113 @@ def save_permissions(
     conn.commit()
 
 
-def fetch_permission(
+def _load_permission_rows(
     guild_id: int | None,
-    role_id: list[int] = []
+    role_ids: Iterable[int] | None = None,
 ) -> list[tuple[Permissions | None, bool]]:
-    """Load persisted permissions for a guild/role, or None if missing.
+    # stored_guild_id = _encode_permission_scope(guild_id)
+    if role_ids is None:
+        if guild_id is None:
+            return [(None, False)]
+        role_ids = [guild_id]
 
-    If `guild_id` is None, role_id will act as user_id for a DM permission entry.
-    If `role_id` is None, will set `role_id` to `guild_id` (@everyone role).
-    """
-    if guild_id is None and not role_id:
-        raise ValueError("Must specify at least guild_id or role_id to fetch a permission entry.")
-    if not role_id:
-        role_id = [guild_id] #  type: ignore[list-item]
-
+    role_id_set = {int(role_id) for role_id in role_ids}
     conn, cursor = _get_conn()
-    cursor.execute(
+    rows = cursor.execute(
         "SELECT role_id, data, can_save FROM guild_permissions WHERE guild_id IS ?",
         (guild_id,),
-    )
+    ).fetchall()
 
-    perms: list[tuple[Permissions | None, bool]] = []
-    for row in cursor:
-        r_id, data, can_save = row
-        if int(r_id) in role_id:
-            try:
-                perms.append((pickle.loads(data), bool(can_save)))
-            except Exception:
-                logging.exception(
-                    "Failed to unpickle guild permission for guild_id=%s role_id=%s", guild_id, r_id
-                )
-    return perms or [(None, False)]
+    permissions: list[tuple[Permissions | None, bool]] = []
+    for role_id, data, can_save in rows:
+        if int(role_id) not in role_id_set:
+            continue
+
+        try:
+            permissions.append((pickle.loads(data), bool(can_save)))
+        except Exception:
+            scope = f"guild ID {guild_id}" if guild_id is not None else "DM"
+            logging.exception(
+                "Failed to unpickle REPL permissions for %s, role ID %s",
+                scope,
+                role_id,
+            )
+
+    return permissions or [(None, False)]
 
 
-def fetch_user_guild_permissions(
-    ctx: discord.ApplicationContext
-) -> tuple[Permissions, bool]:
-    """Fetch and merge permissions for a user based on their guild roles.
-
-    This will fetch permissions for each role in `user_role_ids` and merge them together.
-    If `guild_id` is None, this will look for DM permission entries with role_id=user_id.
-    """
+def get_effective_repl_permissions(ctx: discord.ApplicationContext) -> tuple[Permissions, bool]:
+    """Merge the caller's effective permissions from guild roles or DM entries."""
     if ctx.guild_id:
-        user_role_ids = [role.id for role in ctx.author.roles]  # type: ignore[attr-defined]
+        role_ids = [role.id for role in ctx.author.roles]  # type: ignore[attr-defined]
     else:
-        user_role_ids = [ctx.author.id]
+        role_ids = [ctx.author.id]
 
-    perms_list, can_save_list = zip(*fetch_permission(ctx.guild_id, user_role_ids))
+    permissions, can_save_flags = zip(*_load_permission_rows(ctx.guild_id, role_ids))
+    return Permissions.permissive_merge(*permissions), any(can_save_flags)
 
-    return Permissions.permissive_merge(*perms_list), any(can_save_list)
 
-
-def delete_permissions(guild_id: int | None, role_id: int | None = None) -> None:
-    """Delete a guild/role permission entry. If `role_id` is None delete all for guild.
-    
-    If `guild_id` is None, role_id will act as user_id for a DM permission entry.
-    """
+def delete_repl_permissions(guild_id: int | None, role_id: int | None = None) -> None:
+    """Delete REPL permissions for a role or for the whole guild/DM scope."""
     if guild_id is None and role_id is None:
-        raise ValueError("Must specify at least guild_id or role_id to delete a permission entry.")
+        raise ValueError("guild_id or role_id must be provided")
 
+    # stored_guild_id = _encode_permission_scope(guild_id)
     conn, cursor = _get_conn()
     if role_id is None:
         cursor.execute("DELETE FROM guild_permissions WHERE guild_id IS ?", (guild_id,))
     else:
-        cursor.execute("DELETE FROM guild_permissions WHERE guild_id IS ? AND role_id = ?", (guild_id, role_id))
+        cursor.execute(
+            "DELETE FROM guild_permissions WHERE guild_id IS ? AND role_id = ?",
+            (guild_id, role_id),
+        )
     conn.commit()
 
 
-def list_permissions(guild_id: int | None = None) -> list[tuple[int, int, Permissions, bool, float]]:
-    """Return list of `(guild_id, role_id, data, can_save)` tuples for stored permissions.
-
-    If `guild_id` is provided, only returns entries for that guild.
-    If `guild_id` is None, role_id will act as user_id for a DM permission entry.
-    """
+def list_repl_permissions(
+    guild_id: int | None = None,
+    *,
+    include_all_scopes: bool = False,
+) -> list[tuple[int | None, int, Permissions, bool, float]]:
+    """List stored REPL permissions for one scope or for all scopes."""
     conn, cursor = _get_conn()
-    cur = cursor.execute("SELECT guild_id, role_id, data, can_save, updated FROM guild_permissions WHERE guild_id IS ?", (guild_id,))
-    entries = [(row[0], row[1], pickle.loads(row[2]), bool(row[3]), row[4]) for row in cur.fetchall()]
+    if include_all_scopes:
+        rows = cursor.execute(
+            "SELECT guild_id, role_id, data, can_save, updated FROM guild_permissions ORDER BY updated DESC"
+        ).fetchall()
+    else:
+        rows = cursor.execute(
+            "SELECT guild_id, role_id, data, can_save, updated FROM guild_permissions WHERE guild_id IS ? ORDER BY updated DESC",
+            (guild_id,),
+        ).fetchall()
+
+    entries: list[tuple[int | None, int, Permissions, bool, float]] = []
+    for row_guild_id, row_role_id, row_data, can_save, updated in rows:
+        try:
+            entries.append(
+                (
+                    int(row_guild_id),
+                    int(row_role_id),
+                    pickle.loads(row_data),
+                    bool(can_save),
+                    float(updated),
+                )
+            )
+        except Exception:
+            scope = f"guild ID {row_guild_id}" if row_guild_id is not None else "DM"
+            logging.exception(
+                "Failed to unpickle REPL permissions for %s, role ID %s",
+                scope,
+                row_role_id,
+            )
+
     return entries
 
 
-
 def setup(bot: commands.Bot) -> None:
-    bot.add_cog(DBCog(bot))
+    """Initialize the database when the extension is loaded."""
+    del bot
+    init_db()
 
-# initialize default DB on import
+
 init_db()

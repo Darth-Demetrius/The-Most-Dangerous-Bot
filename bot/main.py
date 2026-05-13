@@ -1,20 +1,25 @@
 import asyncio
+import json
 import inspect
+import logging
+import os
 import signal
+import sys
+import time
+from dataclasses import dataclass
+from pathlib import Path
 
+import aiohttp
 import discord
 from discord.ext import commands
-import sys
-from pathlib import Path
+from dotenv import load_dotenv
 
 # Ensure the project root is on sys.path so sibling packages (like `cogs`)
 # can be imported regardless of how this module is executed.
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
-from dotenv import load_dotenv
-import logging
-import os
+
 from bot.logger import configure_process_logging
 
 
@@ -22,18 +27,6 @@ handler = configure_process_logging(PROJECT_ROOT)
 
 load_dotenv()
 TOKEN = os.getenv('DISCORD_TOKEN') or ""
-
-# Parse TEST_GUILD_IDS env var into a list[int] or None.
-_g_env = os.getenv("TEST_GUILD_IDS", "").strip()
-if _g_env:
-    try:
-        TEST_GUILD_IDS = [int(x.strip()) for x in _g_env.split(",") if x.strip()]
-        if not TEST_GUILD_IDS:
-            TEST_GUILD_IDS = None
-    except Exception:
-        TEST_GUILD_IDS = None
-else:
-    TEST_GUILD_IDS = None
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -47,22 +40,55 @@ cogs_list: list[str] = [
 ]
 
 TESTING = True  # Set to False to disable test guild command registration and related logging
-SHUTDOWN_REQUESTED = False
-SHUTDOWN_TASK: asyncio.Task[None] | None = None
-HELP_TEXT = "\n".join(
+
+
+@dataclass
+class RuntimeState:
+    """Mutable runtime state for graceful shutdown orchestration."""
+
+    shutdown_requested: bool = False
+    shutdown_task: asyncio.Task[None] | None = None
+
+
+STATE = RuntimeState()
+RESTART_NOTICE_PATH = PROJECT_ROOT / "logs" / "restart_notice.tmp"
+RESTART_NOTICE_MAX_AGE_SECONDS = 300
+
+
+@dataclass(frozen=True)
+class RestartNotification:
+    """Saved metadata for a restart acknowledgement message."""
+
+    message_id: int
+    user_id: int
+    guild_id: int | None
+    application_id: int
+    interaction_token: str
+
+
+def _parse_test_guild_ids() -> list[int] | None:
+    """Parse TEST_GUILD_IDS from env into a list[int] or None."""
+    guild_ids_env = os.getenv("TEST_GUILD_IDS", "").strip()
+    if not guild_ids_env:
+        return None
+
+    try:
+        guild_ids = [int(item.strip()) for item in guild_ids_env.split(",") if item.strip()]
+        return guild_ids or None
+    except ValueError:
+        return None
+
+
+TEST_GUILD_IDS = _parse_test_guild_ids()
+
+
+CORE_HELP_TEXT = "\n".join(
     [
         "Available commands:",
         "/help - Show this message.",
-        "/repl open - Open a Python REPL session.",
-        "/repl instructions - Show REPL coding instructions.",
-        "/repl close - Close your current REPL session.",
-        "/repl vars - List variables in your active or saved REPL session.",
-        "/repl perms - Show your effective REPL permission level.",
-        "/repl session_imports - Show the imports currently enabled for your REPL session.",
-        "/repl possible_imports - Show the imports allowed by the REPL policy at your permission level.",
-        "/repl list_perms - List stored REPL permissions for this guild or DM.",
-        "/repl set_perms - Set REPL permissions for a guild role (bot owner only).",
+        "/status - Show bot status and loaded cogs.",
         "/shutdown - Shut down the bot (owner only).",
+        "/restart - Restart the bot (owner only).",
     ]
 )
 
@@ -79,16 +105,14 @@ async def _run_shutdown_hooks() -> None:
             if inspect.isawaitable(result):
                 await result
         except Exception:
-            logging.exception("Shutdown hook failed for cog=%s", cog_name)
+            logging.exception("Shutdown hook failed for cog='%s'", cog_name)
 
 
 async def request_shutdown(reason: str) -> None:
-    global SHUTDOWN_REQUESTED
-
-    if SHUTDOWN_REQUESTED:
+    if STATE.shutdown_requested:
         return
 
-    SHUTDOWN_REQUESTED = True
+    STATE.shutdown_requested = True
     print(f"Graceful shutdown requested: {reason}")
 
     try:
@@ -99,20 +123,17 @@ async def request_shutdown(reason: str) -> None:
 
 
 def schedule_shutdown(reason: str) -> asyncio.Task[None]:
-    global SHUTDOWN_TASK
-
-    if SHUTDOWN_TASK is None or SHUTDOWN_TASK.done():
-        SHUTDOWN_TASK = asyncio.create_task(request_shutdown(reason))
-    return SHUTDOWN_TASK
+    if STATE.shutdown_task is None or STATE.shutdown_task.done():
+        STATE.shutdown_task = asyncio.create_task(request_shutdown(reason))
+    return STATE.shutdown_task
 
 
 async def main():
-    global SHUTDOWN_REQUESTED
-
+    """Load cogs and start the Discord bot event loop."""
     if not TOKEN:
         raise RuntimeError("DISCORD_TOKEN is missing")
 
-    SHUTDOWN_REQUESTED = False
+    STATE.shutdown_requested = False
 
     loop = asyncio.get_running_loop()
     for shutdown_signal in (signal.SIGINT, signal.SIGTERM):
@@ -127,15 +148,15 @@ async def main():
     for cog in cogs_list:
         print(f"Loading cog: {cog}")
         bot.load_extension(cog)
-        print(f"Loaded cog: {cog}")
+        print(f"Loaded cog: {cog} successfully")
 
     print("Connecting to Discord...")
     try:
-        await bot.start(TOKEN, reconnect=False)
+        await bot.start(TOKEN, reconnect=True)
     except RuntimeError as exc:
         # py-cord may raise this during normal /shutdown teardown while
         # the websocket connect task is still unwinding.
-        if str(exc) == "Session is closed" and SHUTDOWN_REQUESTED:
+        if str(exc) == "Session is closed" and STATE.shutdown_requested:
             return
         raise
 
@@ -146,6 +167,9 @@ async def on_ready():
     print(f"{bot.user} has connected to Discord")
     print(f"  Guilds : {guild_names}")
     print(f"  Latency: {bot.latency * 1000:.1f} ms")
+
+    await _deliver_restart_notice()
+
     if not TESTING:
         print("Syncing commands globally...")
         await bot.sync_commands()
@@ -157,52 +181,209 @@ async def on_ready():
         print("Commands synced.")
 
 
+def _build_help_text() -> str:
+    """Build help text from the core commands and cog-exported help blocks."""
+    sections = [CORE_HELP_TEXT]
+    for cog in bot.cogs.values():
+        help_text = getattr(cog, "HELP_TEXT", "")
+        if help_text:
+            sections.append(help_text)
+    return "\n".join(sections)
+
+
 @bot.slash_command(
     name='help',
     description='Show the available bot commands',
 )
-async def help_command(ctx: discord.ApplicationContext):
+async def show_help(ctx: discord.ApplicationContext):
     """Show the currently available bot commands."""
-    await ctx.respond(HELP_TEXT, ephemeral=True)
+    await ctx.respond(_build_help_text(), ephemeral=True)
+
+
+@bot.slash_command(
+    name='status',
+    description='Show bot status and loaded cogs',
+)
+async def show_status(ctx: discord.ApplicationContext):
+    """Show the current runtime status of the bot."""
+    loaded_cogs = ", ".join(sorted(bot.cogs)) or "(none)"
+    await ctx.respond(
+        "\n".join(
+            [
+                f"Guilds: {len(bot.guilds)}",
+                f"Loaded cogs: {loaded_cogs}",
+                f"Latency: {bot.latency * 1000:.1f} ms",
+                f"Testing mode: {TESTING}",
+            ]
+        ),
+        ephemeral=True,
+    )
 
 @bot.slash_command(
     name='shutdown',
     description='Shut down the bot (owner only)',
-    default_member_permissions=discord.Permissions(administrator=True),
 )
-#@commands.is_owner()
-async def shutdown(ctx: discord.ApplicationContext):
-    if not await bot.is_owner(ctx.author):
-        await ctx.respond('Only the bot owner may use this command.', ephemeral=True)
+@discord.default_permissions(administrator=True)
+@commands.is_owner()
+async def stop_bot(ctx: discord.ApplicationContext):
+    """Shut down the bot via systemd."""
+    await _run_owner_systemctl(ctx, action="stop", action_label="Shutting down")
+
+
+@bot.slash_command(
+    name='restart',
+    description='Restart the bot (owner only)',
+)
+@discord.default_permissions(administrator=True)
+@commands.is_owner()
+async def restart_bot(ctx: discord.ApplicationContext):
+    """Restart the bot via systemd."""
+    await _run_owner_systemctl(ctx, action="restart", action_label="Restarting")
+
+
+async def _run_owner_systemctl(
+    ctx: discord.ApplicationContext,
+    *,
+    action: str,
+    action_label: str,
+) -> None:
+    """Run a systemctl action for an owner-only command."""
+
+    guild_name = f"{ctx.guild.name} ({ctx.guild.id})" if ctx.guild else "DM"
+    print(f"{action.title()} requested by {ctx.author.name} in {guild_name}")
+    await ctx.respond(f"{action_label}...")
+    if action == "restart":
+        try:
+            restart_message = await ctx.interaction.original_response()
+
+            _save_restart_notice(
+                message_id=restart_message.id,
+                user_id=ctx.author.id,
+                guild_id=ctx.guild_id,
+                application_id=ctx.interaction.application_id,
+                interaction_token=ctx.interaction.token,
+            )
+            print(
+                "Saved restart notice for "
+                f"user='{ctx.author.name}' ({ctx.author.id}) in "
+                f"guild='{ctx.guild.name}' ({ctx.guild_id}) " if ctx.guild else "DM "
+                f"application={ctx.interaction.application_id} "
+                f"message={restart_message.id}"
+            )
+        except Exception:
+            logging.exception(
+                "Failed to save restart notification for user='%s' (%s) in %s",
+                ctx.author.name,
+                ctx.author.id,
+                f"'{ctx.guild.name}' ({ctx.guild_id})" if ctx.guild else "DM",
+            )
+    proc = await asyncio.create_subprocess_exec(
+        'systemctl', '--user', action, 'the-most-dangerous-bot.service'
+    )
+    await proc.wait()
+
+    if proc.returncode == 0:
         return
 
-    print(f"Shutdown requested by {ctx.author} ({ctx.author.id})")
-    await ctx.respond('Shutting down...')
-    await schedule_shutdown(f"slash command by {ctx.author} ({ctx.author.id})")
+    raise RuntimeError(f"systemctl {action} failed with exit code {proc.returncode}")
 
 
-def get_id(obj, id_type: str = "") -> str:
-    match obj:
-        case discord.role.Role:
-            id_type = "role"
-            obj = str(obj.id)
-        case discord.channel.TextChannel:
-            id_type = "channel"
-            obj = str(obj.id)
-        case discord.guild.Guild:
-            id_type = "guild"
-            obj = str(obj.id)
-        case commands.context.Context:
-            id_type = "guild"
-            obj = str(obj.guild.id)
-        case _:
-            obj = str(obj)
+async def _deliver_restart_notice() -> None:
+    """Edit the saved restart response once the new process is ready."""
+    notification = _load_restart_notice()
+    if notification is None:
+        return
 
-    if id_type == "role":
-        return f"<@&{obj}>"
-    elif id_type == "channel":
-        return f"<#{obj}>"
-    return obj
+    user = bot.get_user(notification.user_id)
+    user_info = f"'{user.name}' ({notification.user_id})" if user else f"{notification.user_id}"
+    guild = bot.get_guild(notification.guild_id) if notification.guild_id else None
+    guild_info = f"'{guild.name}' ({notification.guild_id})" if guild else (f"{notification.guild_id}" if notification.guild_id else "DM")
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            webhook = discord.Webhook.partial(
+                notification.application_id,
+                notification.interaction_token,
+                session=session,
+                bot_token=TOKEN,
+            )
+            await webhook.edit_message(notification.message_id, content="Restarted")
+        print(
+            "Delivered restart notice for "
+            f"user={user_info} "
+            f"guild={guild_info} "
+            f"application={notification.application_id} "
+            f"message={notification.message_id}"
+        )
+    except Exception:
+        logging.exception(
+            "Failed to deliver restart notice for user=%s guild=%s application=%s message=%s",
+            user_info,
+            guild_info,
+            notification.application_id,
+            notification.message_id,
+        )
+    finally:
+        _delete_restart_notice()
+
+
+def _save_restart_notice(
+    *,
+    message_id: int,
+    user_id: int,
+    guild_id: int | None,
+    application_id: int,
+    interaction_token: str,
+) -> None:
+    """Write restart metadata to a small temp file in logs."""
+    RESTART_NOTICE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "message_id": message_id,
+        "user_id": user_id,
+        "guild_id": guild_id,
+        "application_id": application_id,
+        "interaction_token": interaction_token,
+    }
+    with RESTART_NOTICE_PATH.open("w", encoding="utf-8") as temp_file:
+        json.dump(payload, temp_file)
+        temp_file.flush()
+        os.fsync(temp_file.fileno())
+
+
+def _load_restart_notice() -> RestartNotification | None:
+    """Read restart metadata from the temp file if it exists."""
+    if not RESTART_NOTICE_PATH.exists():
+        print("No restart notice to deliver")
+        return None
+
+    try:
+        payload = json.loads(RESTART_NOTICE_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        logging.exception("Failed to read restart notice from %s", RESTART_NOTICE_PATH)
+        return None
+
+    if not isinstance(payload, dict):
+        return None
+
+    try:
+        return RestartNotification(
+            message_id=int(payload["message_id"]),
+            user_id=int(payload["user_id"]),
+            guild_id=None if payload.get("guild_id") is None else int(payload["guild_id"]),
+            application_id=int(payload["application_id"]),
+            interaction_token=str(payload["interaction_token"])
+        )
+    except Exception:
+        logging.exception("Invalid restart notice payload in %s", RESTART_NOTICE_PATH)
+        return None
+
+
+def _delete_restart_notice() -> None:
+    """Remove the restart temp file if it exists."""
+    try:
+        RESTART_NOTICE_PATH.unlink(missing_ok=True)
+    except Exception:
+        logging.exception("Failed to delete restart notice at %s", RESTART_NOTICE_PATH)
 
 
 if __name__ == "__main__":

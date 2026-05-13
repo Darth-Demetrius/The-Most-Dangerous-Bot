@@ -4,7 +4,7 @@ import os
 import discord
 #from dotenv import load_dotenv
 from Location_Data import *
-from Command_List import *
+from help_text import help_text
 
 #load_dotenv()
 TOKEN = os.getenv('DISCORD_TOKEN')
@@ -110,7 +110,7 @@ async def on_message(message):
         #help
         if content[0] == "/help":
             await message.delete()
-            await message.channel.send(help())
+            await message.channel.send(help_text())
             return
 
         if content[0] == "/start":

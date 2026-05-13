@@ -1,0 +1,4 @@
+#!/bin/sh
+
+systemctl --user status the-most-dangerous-bot.service
+echo "Bot started."

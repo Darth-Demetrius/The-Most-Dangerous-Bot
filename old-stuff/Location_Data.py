@@ -27,10 +27,10 @@ def place(player, location):
 	try:
 		if len(location) == 2:
 			row = ord(location[0].upper())-0x41
-			if row < 0 or row > 6: raise x
+			if row < 0 or row > 6: raise ValueError
 			col = int(location[1])-1
-			if col < 0 or col > 8: raise x
-		else: raise x
+			if col < 0 or col > 8: raise ValueError
+		else: raise ValueError
 		map[row][col].append(player)
 	except: return ["Invalid location", 1]
 	return [f"{player} moved to {location}", 0]
@@ -50,10 +50,10 @@ def check(location):
 	try:
 		if len(location) == 2:
 			row = ord(location[0].upper())-0x41
-			if row < 0 or row > 6: raise x
+			if row < 0 or row > 6: raise ValueError
 			col = int(location[1])-1
-			if col < 0 or col > 8: raise x
-		else: raise x
+			if col < 0 or col > 8: raise ValueError
+		else: raise ValueError
 	except: return [f"{location} is an invalid location", 1]
 	temp = location + ": "
 	for player in map[row][col]: temp += " " + player

@@ -87,7 +87,7 @@ def add_key(key: str, subkeys: dict = None, value: str = None) -> str:
 		for id in db.keys():
 			if id == "max subkey length": continue
 			if id == "default": continue
-			db[id][key] = db["dafault"][key]
+			db[id][key] = db["default"][key]
 			text = text + f" ___{id}___"
 		return text
 def add_subkeys(id: str, key: str, subkeys: dict) -> str:

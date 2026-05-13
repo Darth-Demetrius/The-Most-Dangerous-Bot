@@ -1,4 +1,7 @@
 
+from Location_Data import check, find, move, place, remove
+from help_text import help_text
+
 
 
 async def on_command(message, client, channels, roles, emojis):
@@ -7,7 +10,7 @@ async def on_command(message, client, channels, roles, emojis):
 	#help
 	if contents[0] == "help":
 		await message.delete()
-		await message.channel.send(help())
+		await message.channel.send(help_text())
 		return
 
 	#start
@@ -37,7 +40,7 @@ async def on_command(message, client, channels, roles, emojis):
 			return
 		
 		await message.delete()
-		await client.get_channel(channels["Announcements"]).send(message.contents[9:])
+		await client.get_channel(channels["Announcements"]).send(message.content[9:])
 		return
 
 	#begin
@@ -50,7 +53,7 @@ async def on_command(message, client, channels, roles, emojis):
 			return
 		
 		await message.delete()
-		msg = message.contents[6:]
+		msg = message.content[6:]
 		msg += "\n\nReact with :regional_indicator_d: for DM, "
 		msg += ":regional_indicator_h: for Hunter, "
 		msg += "or :regional_indicator_f: for Fugitive."
