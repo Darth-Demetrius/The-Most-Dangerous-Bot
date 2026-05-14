@@ -24,7 +24,8 @@ from bot.logger import configure_process_logging
 from defines.link_text import user_scope_text
 
 
-handler = configure_process_logging(PROJECT_ROOT)
+configure_process_logging(PROJECT_ROOT)
+_LOGGER = logging.getLogger(__name__)
 
 load_dotenv()
 TOKEN = os.getenv('DISCORD_TOKEN') or ""
@@ -33,7 +34,7 @@ intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
 
-bot = commands.Bot(command_prefix='/', intents=intents, log_handler=handler, log_level=logging.INFO)
+bot = commands.Bot(command_prefix='/', intents=intents)
 
 cogs_list: list[str] = [
     "cogs.bot_repl",
@@ -100,13 +101,13 @@ async def _run_shutdown_hooks() -> None:
         if hook is None:
             continue
 
-        print(f"Running graceful shutdown hook for cog: {cog_name}")
+        _LOGGER.info("Running graceful shutdown hook for cog: %s", cog_name)
         try:
             result = hook()
             if inspect.isawaitable(result):
                 await result
         except Exception:
-            logging.exception("Shutdown hook failed for cog='%s'", cog_name)
+            _LOGGER.exception("Shutdown hook failed for cog='%s'", cog_name)
 
 
 async def request_shutdown(reason: str) -> None:
@@ -114,7 +115,7 @@ async def request_shutdown(reason: str) -> None:
         return
 
     STATE.shutdown_requested = True
-    print(f"Graceful shutdown requested: {reason}")
+    _LOGGER.info("Graceful shutdown requested: %s", reason)
 
     try:
         await _run_shutdown_hooks()
@@ -147,11 +148,11 @@ async def main():
             pass
 
     for cog in cogs_list:
-        print(f"Loading cog: {cog}")
+        _LOGGER.info("Loading cog: %s", cog)
         bot.load_extension(cog)
-        print(f"Loaded cog: {cog} successfully")
+        _LOGGER.info("Loaded cog: %s successfully", cog)
 
-    print("Connecting to Discord...")
+    _LOGGER.info("Connecting to Discord...")
     try:
         await bot.start(TOKEN, reconnect=True)
     except RuntimeError as exc:
@@ -165,21 +166,21 @@ async def main():
 @bot.event
 async def on_ready():
     guild_names = ", ".join(f"{g.name} ({g.id})" for g in bot.guilds) or "(none)"
-    print(f"{bot.user} has connected to Discord")
-    print(f"  Guilds : {guild_names}")
-    print(f"  Latency: {bot.latency * 1000:.1f} ms")
+    _LOGGER.info("%s has connected to Discord", bot.user)
+    _LOGGER.info("Guilds: %s", guild_names)
+    _LOGGER.info("Latency: %.1f ms", bot.latency * 1000)
 
     await _deliver_restart_notice()
 
     if not TESTING:
-        print("Syncing commands globally...")
+        _LOGGER.info("Syncing commands globally...")
         await bot.sync_commands()
-        print("Commands synced globally.")
+        _LOGGER.info("Commands synced globally.")
     else:
         guild_ids_str = ", ".join(str(g) for g in TEST_GUILD_IDS) if TEST_GUILD_IDS else "(all guilds)"
-        print(f"Syncing commands to test guilds: {guild_ids_str}")
+        _LOGGER.info("Syncing commands to test guilds: %s", guild_ids_str)
         await bot.sync_commands(guild_ids=TEST_GUILD_IDS)
-        print("Commands synced.")
+        _LOGGER.info("Commands synced.")
 
 
 def _build_help_text() -> str:
@@ -251,7 +252,7 @@ async def _run_owner_systemctl(
     """Run a systemctl action for an owner-only command."""
 
     actor_scope = user_scope_text(ctx.author, ctx.guild)
-    print(f"{action.title()} requested by {actor_scope}")
+    _LOGGER.info("%s requested by %s", action.title(), actor_scope)
     await ctx.respond(f"{action_label}...")
     if action == "restart":
         try:
@@ -265,15 +266,15 @@ async def _run_owner_systemctl(
                 interaction_token=ctx.interaction.token,
             )
             restart_scope = user_scope_text(ctx.author, ctx.guild)
-            print(
-                "Saved restart notice for "
-                f"{restart_scope} "
-                f"application={ctx.interaction.application_id} "
-                f"message={restart_message.id}"
+            _LOGGER.info(
+                "Saved restart notice for %s application=%s message=%s",
+                restart_scope,
+                ctx.interaction.application_id,
+                restart_message.id,
             )
         except Exception:
             error_scope = user_scope_text(ctx.author, ctx.guild)
-            logging.exception(
+            _LOGGER.exception(
                 "Failed to save restart notification for %s",
                 error_scope,
             )
@@ -307,14 +308,14 @@ async def _deliver_restart_notice() -> None:
                 bot_token=TOKEN,
             )
             await webhook.edit_message(notification.message_id, content="Restarted")
-        print(
-            "Delivered restart notice for "
-            f"{notice_scope} "
-            f"application={notification.application_id} "
-            f"message={notification.message_id}"
+        _LOGGER.info(
+            "Delivered restart notice for %s application=%s message=%s",
+            notice_scope,
+            notification.application_id,
+            notification.message_id,
         )
     except Exception:
-        logging.exception(
+        _LOGGER.exception(
             "Failed to deliver restart notice for %s application=%s message=%s",
             notice_scope,
             notification.application_id,
@@ -350,13 +351,13 @@ def _save_restart_notice(
 def _load_restart_notice() -> RestartNotification | None:
     """Read restart metadata from the temp file if it exists."""
     if not RESTART_NOTICE_PATH.exists():
-        print("No restart notice to deliver")
+        _LOGGER.debug("No restart notice to deliver")
         return None
 
     try:
         payload = json.loads(RESTART_NOTICE_PATH.read_text(encoding="utf-8"))
     except Exception:
-        logging.exception("Failed to read restart notice from %s", RESTART_NOTICE_PATH)
+        _LOGGER.exception("Failed to read restart notice from %s", RESTART_NOTICE_PATH)
         return None
 
     if not isinstance(payload, dict):
@@ -371,7 +372,7 @@ def _load_restart_notice() -> RestartNotification | None:
             interaction_token=str(payload["interaction_token"])
         )
     except Exception:
-        logging.exception("Invalid restart notice payload in %s", RESTART_NOTICE_PATH)
+        _LOGGER.exception("Invalid restart notice payload in %s", RESTART_NOTICE_PATH)
         return None
 
 
@@ -380,7 +381,7 @@ def _delete_restart_notice() -> None:
     try:
         RESTART_NOTICE_PATH.unlink(missing_ok=True)
     except Exception:
-        logging.exception("Failed to delete restart notice at %s", RESTART_NOTICE_PATH)
+        _LOGGER.exception("Failed to delete restart notice at %s", RESTART_NOTICE_PATH)
 
 
 if __name__ == "__main__":

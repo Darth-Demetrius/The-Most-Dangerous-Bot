@@ -21,6 +21,8 @@ class _MirrorStream:
 
     Terminal output is written as-is. Log file output is prefixed with a
     timestamp at the start of each line.
+
+    Used to mirror process stdout/stderr into the runtime log file.
     """
 
     def __init__(self, terminal: TextIO, log_file: TextIO) -> None:
@@ -44,6 +46,21 @@ class _MirrorStream:
 
     def isatty(self) -> bool:
         return self._terminal.isatty()
+
+
+class _SystemLogFilter(logging.Filter):
+    """Filter records for system logs.
+
+    Allow application-level lifecycle logs from ``bot.main`` and all errors
+    from any logger.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if getattr(record, "user_code_error", False):
+            return False
+        if record.levelno >= logging.ERROR:
+            return True
+        return record.name.startswith("bot.main") and record.levelno >= logging.INFO
 
 
 def _rollover_if_nonempty(log_path: Path) -> None:
@@ -88,6 +105,31 @@ def _timestamp_from_filename(log_path: Path) -> datetime | None:
         return None
 
 
+def _matching_timestamped_logs(log_dir: Path, log_stem: str) -> list[tuple[datetime, Path]]:
+    """Collect timestamped rolled logs for a given base log name.
+
+    Args:
+        log_dir: Directory containing active and rolled logs.
+        log_stem: Base log name, such as ``bot`` or ``discord``.
+
+    Returns:
+        Sorted pairs of parsed timestamp and log path for matching rolled logs.
+    """
+    timestamped_logs: list[tuple[datetime, Path]] = []
+    for log_file in log_dir.glob(f"{log_stem}-*.log"):
+        if not log_file.is_file():
+            continue
+
+        timestamp = _timestamp_from_filename(log_file)
+        if timestamp is None:
+            continue
+
+        timestamped_logs.append((timestamp, log_file))
+
+    timestamped_logs.sort(key=lambda item: (item[0], item[1].name))
+    return timestamped_logs
+
+
 def _compress_monthly_logs(archive_dir: Path) -> None:
     """Compress archived logs by month when multiple logs exist for that month.
 
@@ -129,25 +171,24 @@ def _compress_monthly_logs(archive_dir: Path) -> None:
             log_file.unlink()
 
 
-def _archive_stale_logs(log_dir: Path, archive_dir: Path) -> None:
-    """Move log files older than ``ARCHIVE_AGE_HOURS`` into ``archive_dir``.
+def _prune_stale_logs(log_dir: Path, archive_dir: Path, log_stem: str, *, archive: bool) -> None:
+    """Prune rolled logs older than ``ARCHIVE_AGE_HOURS`` for one log family.
 
-    Empty stale logs are deleted instead of archived.
+    Empty stale logs are deleted. Non-empty stale logs are either archived or
+    deleted, depending on ``archive``.
 
     Args:
         log_dir: Directory containing active and recent log files.
         archive_dir: Directory used for long-term log archives.
+        log_stem: Base log name, such as ``bot`` or ``discord``.
+        archive: When true, move stale logs into ``archive_dir``. When false,
+            delete them instead.
     """
     cutoff = datetime.now() - timedelta(hours=ARCHIVE_AGE_HOURS)
-    archive_dir.mkdir(parents=True, exist_ok=True)
+    if archive:
+        archive_dir.mkdir(parents=True, exist_ok=True)
 
-    for log_file in log_dir.glob("*.log"):
-        if not log_file.is_file():
-            continue
-
-        timestamp = _timestamp_from_filename(log_file)
-        if timestamp is None:
-            continue
+    for timestamp, log_file in _matching_timestamped_logs(log_dir, log_stem):
         if timestamp >= cutoff:
             continue
 
@@ -155,58 +196,65 @@ def _archive_stale_logs(log_dir: Path, archive_dir: Path) -> None:
             log_file.unlink()
             continue
 
-        target_path = archive_dir / log_file.name
-        log_file.replace(target_path)
+        if archive:
+            target_path = archive_dir / log_file.name
+            log_file.replace(target_path)
+        else:
+            log_file.unlink()
 
 
-def _archive_excess_top_level_logs(log_dir: Path, archive_dir: Path) -> None:
-    """Archive oldest timestamped logs until the top-level count is within limit.
+def _prune_excess_top_level_logs(
+    log_dir: Path,
+    archive_dir: Path,
+    log_stem: str,
+    *,
+    archive: bool,
+) -> None:
+    """Trim rolled logs until the per-family top-level count is within limit.
 
-    Only rolled logs with timestamped names are counted. Active ``bot.log`` and
-    ``discord.log`` are not counted toward this limit.
+    Only rolled logs with timestamped names matching ``log_stem`` are counted.
+    The active log file is not counted toward this limit.
 
     Args:
         log_dir: Directory containing active and rolled logs.
         archive_dir: Directory used for long-term log archives.
+        log_stem: Base log name, such as ``bot`` or ``discord``.
+        archive: When true, move excess logs into ``archive_dir``. When false,
+            delete them instead.
     """
-    archive_dir.mkdir(parents=True, exist_ok=True)
+    if archive:
+        archive_dir.mkdir(parents=True, exist_ok=True)
 
-    timestamped_logs: list[tuple[datetime, Path]] = []
-    for log_file in log_dir.glob("*.log"):
-        if not log_file.is_file():
-            continue
-
-        timestamp = _timestamp_from_filename(log_file)
-        if timestamp is None:
-            continue
-
-        timestamped_logs.append((timestamp, log_file))
+    timestamped_logs = _matching_timestamped_logs(log_dir, log_stem)
 
     if len(timestamped_logs) <= MAX_TOP_LEVEL_TIMESTAMPED_LOGS:
         return
 
-    timestamped_logs.sort(key=lambda item: (item[0], item[1].name))
     excess_count = len(timestamped_logs) - MAX_TOP_LEVEL_TIMESTAMPED_LOGS
     for _, log_file in timestamped_logs[:excess_count]:
-        target_path = archive_dir / log_file.name
-        log_file.replace(target_path)
+        if archive:
+            target_path = archive_dir / log_file.name
+            log_file.replace(target_path)
+        else:
+            log_file.unlink()
 
 
-def configure_process_logging(project_root: Path) -> logging.Handler:
+def configure_process_logging(project_root: Path) -> None:
     """Configure runtime and discord logging.
 
     At startup any prior ``bot.log`` / ``discord.log`` that is non-empty is
-    archived to a timestamped file named with the current time. Existing log
-    files with timestamped names older than 24 hours are moved into
-    ``logs/archive`` and compressed by month (``YYYY-MM.zip``). Empty files are
-    silently discarded. Fresh ``bot.log`` and ``discord.log`` are always
-    created for the current session.
+    rolled to timestamped files named with the current time. Existing ``bot``
+    logs older than 24 hours are moved into ``logs/archive`` and compressed by
+    month (``YYYY-MM.zip``), while old ``discord`` logs are deleted instead of
+    archived. Each log family keeps at most five rolled top-level log files.
+    Empty files are silently discarded. Fresh ``bot.log`` and ``discord.log``
+    are always created for the current session.
+
+    The ``discord`` logger is configured directly here because py-cord 2.x
+    ignores the ``log_handler`` constructor parameter on ``commands.Bot``.
 
     Args:
         project_root: Repository root path.
-
-    Returns:
-        A configured logging handler for discord.py.
     """
     log_dir = project_root / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -217,16 +265,42 @@ def configure_process_logging(project_root: Path) -> logging.Handler:
 
     _rollover_if_nonempty(runtime_log_path)
     _rollover_if_nonempty(discord_log_path)
-    _archive_stale_logs(log_dir, archive_dir)
-    _archive_excess_top_level_logs(log_dir, archive_dir)
+    _prune_stale_logs(log_dir, archive_dir, "bot", archive=True)
+    _prune_stale_logs(log_dir, archive_dir, "discord", archive=False)
+    _prune_excess_top_level_logs(log_dir, archive_dir, "bot", archive=True)
+    _prune_excess_top_level_logs(log_dir, archive_dir, "discord", archive=False)
     _compress_monthly_logs(archive_dir)
 
-    runtime_log_file = runtime_log_path.open("w", encoding="utf-8", buffering=1)
-    sys.stdout = _MirrorStream(sys.__stdout__, runtime_log_file)  # type: ignore[assignment]
-    sys.stderr = _MirrorStream(sys.__stderr__, runtime_log_file)  # type: ignore[assignment]
+    # Keep process streams connected to terminal/systemd journal.
+    sys.stdout = sys.__stdout__  # type: ignore[assignment]
+    sys.stderr = sys.__stderr__  # type: ignore[assignment]
 
-    handler = logging.FileHandler(discord_log_path, encoding="utf-8", mode="w")
-    handler.setFormatter(
+    # Route application loggers to both local and system destinations.
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.DEBUG)
+    root_logger.handlers.clear()
+
+    local_handler = logging.FileHandler(runtime_log_path, encoding="utf-8", mode="w")
+    local_handler.setLevel(logging.DEBUG)
+    local_handler.setFormatter(
         logging.Formatter("%(asctime)s:%(levelname)s:%(name)s: %(message)s")
     )
-    return handler
+    root_logger.addHandler(local_handler)
+
+    system_handler = logging.StreamHandler(sys.stderr)
+    system_handler.setLevel(logging.INFO)
+    system_handler.addFilter(_SystemLogFilter())
+    system_handler.setFormatter(
+        logging.Formatter("%(asctime)s:%(levelname)s:%(name)s: %(message)s")
+    )
+    root_logger.addHandler(system_handler)
+
+    # py-cord 2.x ignores the log_handler constructor parameter, so we attach
+    # the discord.log FileHandler directly and stop propagation to root.
+    discord_logger = logging.getLogger("discord")
+    discord_handler = logging.FileHandler(discord_log_path, encoding="utf-8", mode="w")
+    discord_handler.setFormatter(
+        logging.Formatter("%(asctime)s:%(levelname)s:%(name)s: %(message)s")
+    )
+    discord_logger.addHandler(discord_handler)
+    discord_logger.propagate = False

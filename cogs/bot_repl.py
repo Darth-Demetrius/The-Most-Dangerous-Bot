@@ -822,6 +822,7 @@ async def _execute_code(
             _LOGGER.exception(
                 "Error executing code for %s",
                 user_scope_text(message.author, message.guild),
+                extra={"user_code_error": True},
             )
             await message.channel.send(f"`{error_msg}`", reference=message)
             return
