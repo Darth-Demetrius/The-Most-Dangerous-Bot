@@ -12,16 +12,21 @@ import pickle
 import sqlite3
 import time
 from collections.abc import Iterable
-from typing import Any
 
 import discord
 from discord.ext import commands
 
+from defines.link_text import (
+    role_scope_text,
+    scope_text,
+    user_scope_text,
+)
 from defines.user_session import UserSession
 from respy_repl import Permissions
 
 _DB_PATH: str | None = None
 _CONN: sqlite3.Connection | None = None
+_LOGGER = logging.getLogger(__name__)
 
 
 
@@ -32,8 +37,14 @@ def init_db(path: str | None = None) -> None:
     if path is None:
         path = os.path.join(os.getcwd(), "bot_data.db")
 
+    if _CONN is not None and _DB_PATH == path:
+        return
+
+    if _CONN is not None:
+        _CONN.close()
+
     _DB_PATH = path
-    print(f"Initializing REPL database at: {_DB_PATH}")
+    _LOGGER.info("Initializing REPL database at %s", _DB_PATH)
     _CONN = sqlite3.connect(_DB_PATH, check_same_thread=False)
     _CONN.execute(
         """
@@ -42,7 +53,7 @@ def init_db(path: str | None = None) -> None:
             guild_id TEXT,
             data BLOB NOT NULL,
             updated REAL NOT NULL,
-            PRIMARY KEY(user_id, guild_id)
+            PRIMARY KEY(guild_id, user_id)
         )
         """
     )
@@ -51,23 +62,16 @@ def init_db(path: str | None = None) -> None:
     _CONN.execute(
         """
         CREATE TABLE IF NOT EXISTS guild_permissions (
-            guild_id TEXT NOT NULL,
             role_id TEXT NOT NULL,
+            guild_id TEXT,
             data BLOB NOT NULL,
-            can_save INTEGER NOT NULL DEFAULT 0,
             updated REAL NOT NULL,
+            can_save INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY(guild_id, role_id)
         )
         """
     )
     _CONN.commit()
-
-    cols = [row[1] for row in _CONN.execute("PRAGMA table_info(guild_permissions)").fetchall()]
-    if "can_save" not in cols:
-        _CONN.execute(
-            "ALTER TABLE guild_permissions ADD COLUMN can_save INTEGER NOT NULL DEFAULT 1"
-        )
-        _CONN.commit()
 
 
 def _get_conn() -> tuple[sqlite3.Connection, sqlite3.Cursor]:
@@ -78,26 +82,25 @@ def _get_conn() -> tuple[sqlite3.Connection, sqlite3.Cursor]:
     return _CONN, _CONN.cursor()
 
 
-#def _encode_permission_scope(guild_id: int | None) -> int:
-#    """Map DM scope to a stable non-Discord sentinel for storage."""
-#    return DM_PERMISSION_SCOPE_ID if guild_id is None else guild_id
+def close_db() -> None:
+    """Close the shared SQLite connection if it is open."""
+    global _CONN
+
+    if _CONN is not None:
+        _CONN.close()
+        _CONN = None
 
 
-#def _decode_permission_scope(stored_guild_id: int | str | None) -> int | None:
-#    """Decode stored guild scope back into a guild ID or DM scope."""
-#    if stored_guild_id is None:
-#        return None
-#
-#    guild_id = int(stored_guild_id)
-#    return None if guild_id == DM_PERMISSION_SCOPE_ID else guild_id
-
-
-def save_repl_session(user_id: int, guild_id: int | None, session: Any) -> None:
+def save_repl_session(user_id: int, guild_id: int | None, session: UserSession) -> None:
     """Persist a REPL session for a user and optional guild."""
     conn, cursor = _get_conn()
     blob = pickle.dumps(session)
     ts = time.time()
-    print(f"Saving REPL session for user ID {user_id}, guild ID {guild_id} ({len(blob)} bytes)")
+    _LOGGER.debug(
+        "Saving REPL session for %s (%s bytes)",
+        user_scope_text(user_id, guild_id),
+        len(blob),
+    )
     cursor.execute(
         "REPLACE INTO sessions(user_id, guild_id, data, updated) VALUES (?, ?, ?, ?)",
         (user_id, guild_id, blob, ts),
@@ -113,23 +116,25 @@ def load_repl_session(user_id: int, guild_id: int | None = None) -> UserSession 
         (user_id, guild_id),
     ).fetchone()
     if not row:
-        scope = f"guild ID {guild_id}" if guild_id is not None else "DM"
-        print(f"No saved REPL session found for user ID {user_id} in {scope}")
+        _LOGGER.debug(
+            "No saved REPL session found for %s",
+            user_scope_text(user_id, guild_id),
+        )
         return None
 
     try:
         session = pickle.loads(row[0])
         session.user_id = user_id
         session.guild_id = guild_id
-        scope = f"guild ID {guild_id}" if guild_id is not None else "DM"
-        print(f"Loaded REPL session for user ID {user_id} in {scope}")
+        _LOGGER.debug(
+            "Loaded REPL session for %s",
+            user_scope_text(user_id, guild_id),
+        )
         return session
     except Exception:
-        scope = f"guild ID {guild_id}" if guild_id is not None else "DM"
-        logging.exception(
-            "Failed to unpickle REPL session for user ID %s in %s",
-            user_id,
-            scope,
+        _LOGGER.exception(
+            "Failed to unpickle REPL session for %s",
+            user_scope_text(user_id, guild_id),
         )
         return None
 
@@ -142,8 +147,10 @@ def delete_repl_session(user_id: int, guild_id: int | None) -> None:
         (user_id, guild_id),
     )
     conn.commit()
-    scope = f"guild ID {guild_id}" if guild_id is not None else "DM"
-    print(f"Deleted saved REPL session for user ID {user_id} in {scope}")
+    _LOGGER.debug(
+        "Deleted saved REPL session for %s",
+        user_scope_text(user_id, guild_id),
+    )
 
 
 def list_repl_sessions(
@@ -180,8 +187,9 @@ def save_repl_permissions(
     can_save: bool = False,
 ) -> None:
     """Persist REPL permissions for a guild role or DM user."""
-    # stored_guild_id = _encode_permission_scope(guild_id)
     if role_id is None:
+        if guild_id is None:
+            raise ValueError("role_id is required when guild_id is None")
         role_id = guild_id
 
     conn, cursor = _get_conn()
@@ -192,13 +200,17 @@ def save_repl_permissions(
         (guild_id, role_id, blob, can_save, ts),
     )
     conn.commit()
+    _LOGGER.debug(
+        "Saved REPL permissions for %s (can_save=%s)",
+        role_scope_text(role_id, guild_id),
+        can_save,
+    )
 
 
 def _load_permission_rows(
     guild_id: int | None,
     role_ids: Iterable[int] | None = None,
 ) -> list[tuple[Permissions | None, bool]]:
-    # stored_guild_id = _encode_permission_scope(guild_id)
     if role_ids is None:
         if guild_id is None:
             return [(None, False)]
@@ -219,11 +231,9 @@ def _load_permission_rows(
         try:
             permissions.append((pickle.loads(data), bool(can_save)))
         except Exception:
-            scope = f"guild ID {guild_id}" if guild_id is not None else "DM"
-            logging.exception(
-                "Failed to unpickle REPL permissions for %s, role ID %s",
-                scope,
-                role_id,
+            _LOGGER.exception(
+                "Failed to unpickle REPL permissions for %s",
+                role_scope_text(int(role_id), guild_id),
             )
 
     return permissions or [(None, False)]
@@ -245,14 +255,18 @@ def delete_repl_permissions(guild_id: int | None, role_id: int | None = None) ->
     if guild_id is None and role_id is None:
         raise ValueError("guild_id or role_id must be provided")
 
-    # stored_guild_id = _encode_permission_scope(guild_id)
     conn, cursor = _get_conn()
     if role_id is None:
         cursor.execute("DELETE FROM guild_permissions WHERE guild_id IS ?", (guild_id,))
+        _LOGGER.debug("Deleted all REPL permissions in %s", scope_text(guild_id))
     else:
         cursor.execute(
             "DELETE FROM guild_permissions WHERE guild_id IS ? AND role_id = ?",
             (guild_id, role_id),
+        )
+        _LOGGER.debug(
+            "Deleted REPL permissions for %s",
+            role_scope_text(role_id, guild_id),
         )
     conn.commit()
 
@@ -279,7 +293,7 @@ def list_repl_permissions(
         try:
             entries.append(
                 (
-                    int(row_guild_id),
+                    row_guild_id if row_guild_id is None else int(row_guild_id),
                     int(row_role_id),
                     pickle.loads(row_data),
                     bool(can_save),
@@ -287,11 +301,12 @@ def list_repl_permissions(
                 )
             )
         except Exception:
-            scope = f"guild ID {row_guild_id}" if row_guild_id is not None else "DM"
-            logging.exception(
-                "Failed to unpickle REPL permissions for %s, role ID %s",
-                scope,
-                row_role_id,
+            _LOGGER.exception(
+                "Failed to unpickle REPL permissions for %s",
+                role_scope_text(
+                    int(row_role_id),
+                    row_guild_id if row_guild_id is None else int(row_guild_id),
+                ),
             )
 
     return entries
@@ -303,4 +318,7 @@ def setup(bot: commands.Bot) -> None:
     init_db()
 
 
-init_db()
+def teardown(bot: commands.Bot) -> None:
+    """Close database resources when the extension is unloaded."""
+    del bot
+    close_db()

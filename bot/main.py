@@ -21,6 +21,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from bot.logger import configure_process_logging
+from defines.link_text import user_scope_text
 
 
 handler = configure_process_logging(PROJECT_ROOT)
@@ -249,8 +250,8 @@ async def _run_owner_systemctl(
 ) -> None:
     """Run a systemctl action for an owner-only command."""
 
-    guild_name = f"{ctx.guild.name} ({ctx.guild.id})" if ctx.guild else "DM"
-    print(f"{action.title()} requested by {ctx.author.name} in {guild_name}")
+    actor_scope = user_scope_text(ctx.author, ctx.guild)
+    print(f"{action.title()} requested by {actor_scope}")
     await ctx.respond(f"{action_label}...")
     if action == "restart":
         try:
@@ -263,19 +264,18 @@ async def _run_owner_systemctl(
                 application_id=ctx.interaction.application_id,
                 interaction_token=ctx.interaction.token,
             )
+            restart_scope = user_scope_text(ctx.author, ctx.guild)
             print(
                 "Saved restart notice for "
-                f"user='{ctx.author.name}' ({ctx.author.id}) in "
-                f"guild='{ctx.guild.name}' ({ctx.guild_id}) " if ctx.guild else "DM "
+                f"{restart_scope} "
                 f"application={ctx.interaction.application_id} "
                 f"message={restart_message.id}"
             )
         except Exception:
+            error_scope = user_scope_text(ctx.author, ctx.guild)
             logging.exception(
-                "Failed to save restart notification for user='%s' (%s) in %s",
-                ctx.author.name,
-                ctx.author.id,
-                f"'{ctx.guild.name}' ({ctx.guild_id})" if ctx.guild else "DM",
+                "Failed to save restart notification for %s",
+                error_scope,
             )
     proc = await asyncio.create_subprocess_exec(
         'systemctl', '--user', action, 'the-most-dangerous-bot.service'
@@ -294,10 +294,9 @@ async def _deliver_restart_notice() -> None:
     if notification is None:
         return
 
-    user = bot.get_user(notification.user_id)
-    user_info = f"'{user.name}' ({notification.user_id})" if user else f"{notification.user_id}"
-    guild = bot.get_guild(notification.guild_id) if notification.guild_id else None
-    guild_info = f"'{guild.name}' ({notification.guild_id})" if guild else (f"{notification.guild_id}" if notification.guild_id else "DM")
+    user = bot.get_user(notification.user_id) or notification.user_id
+    guild = bot.get_guild(notification.guild_id) if notification.guild_id is not None else None
+    notice_scope = user_scope_text(user, guild if guild is not None else notification.guild_id)
 
     try:
         async with aiohttp.ClientSession() as session:
@@ -310,16 +309,14 @@ async def _deliver_restart_notice() -> None:
             await webhook.edit_message(notification.message_id, content="Restarted")
         print(
             "Delivered restart notice for "
-            f"user={user_info} "
-            f"guild={guild_info} "
+            f"{notice_scope} "
             f"application={notification.application_id} "
             f"message={notification.message_id}"
         )
     except Exception:
         logging.exception(
-            "Failed to deliver restart notice for user=%s guild=%s application=%s message=%s",
-            user_info,
-            guild_info,
+            "Failed to deliver restart notice for %s application=%s message=%s",
+            notice_scope,
             notification.application_id,
             notification.message_id,
         )

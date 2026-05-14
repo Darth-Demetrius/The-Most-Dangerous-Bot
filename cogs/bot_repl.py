@@ -1,16 +1,30 @@
 
-import discord
-from discord.ext import commands
-import re
 import asyncio
-import aiohttp
 import io
 import logging
+import re
 from datetime import datetime
 from urllib.parse import quote
 
+import aiohttp
+import discord
+from discord.ext import commands
+
 from respy_repl import Permissions
 from respy_repl.imports_policy_tables import DEFAULT_IMPORTS_ALLOW, DEFAULT_IMPORTS_BLOCK
+from defines.link_text import (
+    ScopeLike,
+    UserLike,
+    role_link,
+    role_scope_text,
+    role_text,
+    scope_text,
+    user_link,
+    user_scope_text,
+    user_text,
+)
+from defines.user_session import UserSession
+
 from .bot_db import (
     delete_repl_permissions,
     delete_repl_session,
@@ -21,7 +35,8 @@ from .bot_db import (
     save_repl_permissions,
     save_repl_session,
 )
-from defines.user_session import UserSession
+
+_LOGGER = logging.getLogger(__name__)
 
 CODING_INSTRUCTIONS = r"""
 To execute a block of code, send a message containing a triple-backtick code block with optional "python" after the opening fences. For example:
@@ -54,7 +69,7 @@ d4, d6, d8, d10, d12, d20, and d100 are initialized by default as dyce.H(sides) 
 # Testing default: users without explicit stored permissions get level 3.
 DEFAULT_USER_PERMISSION_LEVEL = 3
 
-IDTuple = tuple[int, int | None]  # (user_id, guild_id)
+SessionKey = tuple[int, int | None]  # (user_id, guild_id)
 
 IMPORT_POLICY_CATEGORIES: list[tuple[str, set[str]]] = [
     (
@@ -115,8 +130,8 @@ class REPLCog(commands.Cog):
         ]
     )
 
-    active_sessions: dict[IDTuple, UserSession]  # (user_id, guild_id) -> session
-    session_locks: dict[IDTuple, asyncio.Lock]
+    active_sessions: dict[SessionKey, UserSession]  # (user_id, guild_id) -> session
+    session_locks: dict[SessionKey, asyncio.Lock]
     reaction_http: aiohttp.ClientSession | None
     _shutdown_started: bool
 
@@ -145,87 +160,26 @@ class REPLCog(commands.Cog):
         )
 
     @staticmethod
-    def _user_link(user: discord.User | discord.Member | int) -> str:
-        """Return a markdown link to a user."""
-        if isinstance(user, (discord.User, discord.Member)):
-            user = user.id
-        return f"<@{user}>"
-
-    def _user_text(self, user: discord.User | discord.Member | int) -> str:
-        """Return a readable label for a user."""
-        if isinstance(user, (discord.User, discord.Member)):
-            return f"'@{user.name}' ({user.id})"
-        # Try to fetch from cache
-        fetched = self.bot.get_user(user)
-        if fetched:
-            return f"'@{fetched.name}' ({user})"
-        return f"user ({user})"
-
-    @staticmethod
-    def _role_link(role: discord.Role | int) -> str:
-        """Return a markdown link to a role."""
-        if isinstance(role, discord.Role):
-            if role.is_default():
-                return "@everyone"
-            role = role.id
-        if not role:
-            return "@everyone"
-        return f"<@&{role}>"
-
-    def _role_text(self, role: discord.Role | int) -> str:
-        """Return a readable label for a role."""
-        if isinstance(role, discord.Role):
-            return f"'{role.name}' ({role.id})"
-        # Role IDs alone can't be resolved without knowing the guild, so just return the ID
-        return f"role ({role})"
-
-    @staticmethod
-    def _channel_link(channel: discord.TextChannel | int) -> str:
-        """Return a markdown link to a channel."""
-        if isinstance(channel, discord.TextChannel):
-            channel = channel.id
-        return f"<#{channel}>"
-
-    def _channel_text(self, channel: discord.TextChannel | int | None) -> str:
-        """Return a readable label for a channel or DM."""
-        if isinstance(channel, int):
-            fetched = self.bot.get_channel(channel)
-            if fetched and isinstance(fetched, (discord.TextChannel, discord.VoiceChannel)):
-                return f"'#{fetched.name}' ({channel})"
-            return f"channel ({channel})"
-        if channel is not None:
-            return f"'#{channel.name}' ({channel.id})"
-        return "DM"
-
-    def _scope_text(self, guild: discord.Guild | int | None) -> str:
-        """Return a readable label for a guild or DM scope."""
-        match guild:
-            case discord.Guild():
-                return f"guild '{guild.name}' ({guild.id})"
-            case int():
-                fetched = self.bot.get_guild(guild)
-                if fetched:
-                    return f"guild '{fetched.name}' ({guild})"
-                return f"guild ({guild})"
-            case None:
-                return "DM"
-
-    @staticmethod
     def _format_updated_at(updated_at: float) -> str:
         """Format a UNIX timestamp into a readable local datetime string."""
         return datetime.fromtimestamp(updated_at).strftime("%Y-%m-%d %H:%M:%S")
-
-    @staticmethod
-    def _default_permissions() -> Permissions:
-        """Return the fallback permission set used when no row is configured."""
-        return Permissions(perm_level=DEFAULT_USER_PERMISSION_LEVEL)
 
     def _resolve_permissions(self, ctx: discord.ApplicationContext) -> tuple[Permissions, bool]:
         """Return stored permissions or the configured default fallback."""
         permissions, can_save = get_effective_repl_permissions(ctx)
         if permissions is None:
-            return self._default_permissions(), False
+            return Permissions(perm_level=DEFAULT_USER_PERMISSION_LEVEL), False
         return permissions, can_save
+
+    def _cached_user_or_id(self, user_id: int) -> UserLike:
+        """Return a cached user when available, otherwise keep the ID."""
+        return self.bot.get_user(user_id) or user_id
+
+    def _cached_guild_or_id(self, guild_id: int | None) -> ScopeLike:
+        """Return a cached guild when available, otherwise keep the ID/None."""
+        if guild_id is None:
+            return None
+        return self.bot.get_guild(guild_id) or guild_id
 
     async def graceful_shutdown(self) -> None:
         """Persist saveable active sessions and release HTTP resources during shutdown."""
@@ -237,27 +191,30 @@ class REPLCog(commands.Cog):
         saved_count = 0
         failed_count = 0
 
-        for id_tuple, session in list(self.active_sessions.items()):
+        for session_key, session in list(self.active_sessions.items()):
             if not session.can_save:
                 continue
 
-            lock = self.session_locks.setdefault(id_tuple, asyncio.Lock())
+            lock = self.session_locks.setdefault(session_key, asyncio.Lock())
             async with lock:
                 try:
-                    save_repl_session(*id_tuple, session)
+                    save_repl_session(*session_key, session)
                     saved_count += 1
                 except Exception:
                     failed_count += 1
-                    logging.exception(
-                        "Failed to autosave REPL session during shutdown for user=%s guild=%s",
-                        self._user_text(id_tuple[0]),
-                        self._scope_text(id_tuple[1] or None),
+                    user_id, guild_id = session_key
+                    _LOGGER.exception(
+                        "Failed to autosave REPL session during shutdown for %s",
+                        user_scope_text(
+                            self._cached_user_or_id(user_id),
+                            self._cached_guild_or_id(guild_id),
+                        ),
                     )
 
         if self.reaction_http is not None and not self.reaction_http.closed:
             await self.reaction_http.close()
 
-        print(
+        _LOGGER.info(
             "REPL graceful shutdown complete "
             f"[active={session_count}, autosaved={saved_count}, failed={failed_count}]"
         )
@@ -275,7 +232,7 @@ class REPLCog(commands.Cog):
 
         user_id = message.author.id
         guild_id = message.guild.id if message.guild else None
-        session = self.active_sessions.get((user_id, guild_id), None)
+        session = self.active_sessions.get((user_id, guild_id))
         if session is None:
             return
 
@@ -331,12 +288,12 @@ class REPLCog(commands.Cog):
             - False: do not show coding instructions
         """
         _made = ""
-        id_tuple = (ctx.author.id, ctx.guild_id)
+        session_key = (ctx.author.id, ctx.guild_id)
 
-        user_session = load_repl_session(*id_tuple)
+        user_session = load_repl_session(*session_key)
         if user_session is None:
             perms, can_save = self._resolve_permissions(ctx)
-            user_session = UserSession(perms, {}, *id_tuple, can_save)
+            user_session = UserSession(perms, {}, *session_key, can_save)
             _made = "New"
         elif fresh or not user_session.can_save:
             user_session.user_vars = {}
@@ -344,20 +301,17 @@ class REPLCog(commands.Cog):
         else:
             _made = "Saved"
 
-        if user_session is None:
-            await ctx.respond('You do not have permission to open a REPL session.', ephemeral=True)
-            print(f"Denied REPL open for {self._user_text(ctx.author)} in {self._scope_text(ctx.guild_id)} due to insufficient permissions")
-            return
-
         if init_dice_vars and _made != 'Saved':
             user_session.exec(
                 "d4, d6, d8, d10, d12, d20, d100 = [MyDyce.H(sides) for sides in (4, 6, 8, 10, 12, 20, 100)]"
             )
 
-        self.active_sessions[id_tuple] = user_session
+        self.active_sessions[session_key] = user_session
 
-        print(
-            f"{_made} REPL session opened for {self._user_text(ctx.author)} in {self._scope_text(ctx.guild_id)}:",
+        _LOGGER.info(
+            "%s REPL session opened for %s: %s",
+            _made,
+            user_scope_text(ctx.author, ctx.guild),
             f"{self._describe_session(user_session)}"
         )
         await ctx.respond(f'{_made} REPL session started.', ephemeral=True)
@@ -385,9 +339,9 @@ class REPLCog(commands.Cog):
     )
     async def close_session(self, ctx: discord.ApplicationContext, save: bool = True) -> None:
         """Save and close the caller's REPL session."""
-        id_tuple = (ctx.author.id, ctx.guild_id)
+        session_key = (ctx.author.id, ctx.guild_id)
 
-        session = self.active_sessions.get(id_tuple, None)
+        session = self.active_sessions.get(session_key)
         if session is None:
             await ctx.respond('No active REPL session to close.', ephemeral=True)
             return
@@ -396,17 +350,19 @@ class REPLCog(commands.Cog):
         save = save and session.can_save
         if save:
             try:
-                save_repl_session(*id_tuple, session)
+                save_repl_session(*session_key, session)
             except Exception as e:
                 await ctx.respond(f'Failed to save session, aborting close: {e}', ephemeral=True)
                 return
 
-        self.active_sessions.pop(id_tuple)
+        self.active_sessions.pop(session_key)
 
-        print(
-            f"REPL session closed for {self._user_text(ctx.author)} in {self._scope_text(ctx.guild_id)} [saved={save}]"
+        _LOGGER.info(
+            "REPL session closed for %s [saved=%s]",
+            user_scope_text(ctx.author, ctx.guild),
+            save,
         )
-        await ctx.respond(f'REPL session {"saved and " if save else ""}closed.', ephemeral=True)
+        await ctx.respond(f'REPL session{" saved and " if save else " "}closed.', ephemeral=True)
 
 
     @repl.command(
@@ -415,8 +371,8 @@ class REPLCog(commands.Cog):
     )
     async def save_session(self, ctx: discord.ApplicationContext) -> None:
         """Persist the caller's active REPL session without closing it."""
-        id_tuple = (ctx.author.id, ctx.guild_id)
-        session = self.active_sessions.get(id_tuple)
+        session_key = (ctx.author.id, ctx.guild_id)
+        session = self.active_sessions.get(session_key)
 
         if session is None:
             await ctx.respond('No active REPL session to save.', ephemeral=True)
@@ -425,7 +381,7 @@ class REPLCog(commands.Cog):
             await ctx.respond('Your REPL session cannot be saved.', ephemeral=True)
             return
 
-        save_repl_session(*id_tuple, session)
+        save_repl_session(*session_key, session)
         await ctx.respond('REPL session saved.', ephemeral=True)
 
 
@@ -435,8 +391,8 @@ class REPLCog(commands.Cog):
     )
     async def delete_saved_session(self, ctx: discord.ApplicationContext) -> None:
         """Delete the caller's saved REPL session."""
-        id_tuple = (ctx.author.id, ctx.guild_id)
-        delete_repl_session(*id_tuple)
+        session_key = (ctx.author.id, ctx.guild_id)
+        delete_repl_session(*session_key)
         await ctx.respond('Saved REPL session deleted.', ephemeral=True)
 
 
@@ -446,11 +402,13 @@ class REPLCog(commands.Cog):
     )
     async def show_session_status(self, ctx: discord.ApplicationContext) -> None:
         """Show the caller's current active and saved REPL session status."""
-        id_tuple = (ctx.author.id, ctx.guild_id)
-        active_session = self.active_sessions.get(id_tuple)
-        saved_session = load_repl_session(*id_tuple)
+        session_key = (ctx.author.id, ctx.guild_id)
+        active_session = self.active_sessions.get(session_key)
+        saved_session = load_repl_session(*session_key)
 
-        parts: list[str] = [f"Scope: {self._scope_text(ctx.guild_id)}"]
+        parts: list[str] = [
+            f"Scope: {scope_text(ctx.guild)}"
+        ]
         if active_session is None:
             parts.append('Active session: none')
         else:
@@ -606,12 +564,16 @@ class REPLCog(commands.Cog):
             can_save=can_save
         )
         await ctx.respond(
-            f'Set permission level for role {self._role_link(guild_role)} to {permission_level}.',
+            f'Set permission level for role {role_link(guild_role)} to {permission_level}.',
             ephemeral=True,
             allowed_mentions=discord.AllowedMentions.none(),
         )
 
-        print(f"Set permissions for role {self._role_text(guild_role)} in {self._scope_text(ctx.guild_id)} to level {permission_level}")
+        _LOGGER.info(
+            "Set permissions for %s to level %s",
+            role_scope_text(guild_role, ctx.guild),
+            permission_level,
+        )
 
 
     @repl.command(
@@ -639,9 +601,16 @@ class REPLCog(commands.Cog):
             if perms is None:
                 continue
             if role_id == guild_id:
-                role_id = 0  # Use 0 to represent @everyone role for cleaner display
+                role_id = 0  # Use 0 to represent @everyone
+
+            if guild_id:
+                resolved_role = ctx.guild.get_role(role_id) if ctx.guild is not None else None
+                mention = role_link(resolved_role or role_id)
+            else:
+                mention = user_link(self._cached_user_or_id(role_id))
+
             lines.append(
-                f"{self._role_link(role_id) if guild_id else self._user_link(role_id)}:  "
+                f"{mention}:  "
                 f"Permissions: {getattr(perms, 'base_perms', perms)}  |  "
                 f"Can Save: {bool(can_save)}  |  "
                 f"Last Updated: {self._format_updated_at(updated)}"
@@ -680,7 +649,7 @@ class REPLCog(commands.Cog):
 
         delete_repl_permissions(ctx.guild_id, guild_role.id)
         await ctx.respond(
-            f'Deleted REPL permissions for {self._role_link(guild_role)}.',
+            f'Deleted REPL permissions for {role_link(guild_role)}.',
             ephemeral=True,
             allowed_mentions=discord.AllowedMentions.none(),
         )
@@ -714,12 +683,13 @@ class REPLCog(commands.Cog):
             await ctx.respond('No saved REPL sessions found.', ephemeral=True)
             return
 
-        lines = [
-            f"User: {self._user_link(user_id)}  |  "
-            f"Scope: {self._scope_text(row_guild_id)}  |  "
-            f"Last Updated: {self._format_updated_at(updated)}"
-            for user_id, row_guild_id, updated in sessions
-        ]
+        lines: list[str] = []
+        for user_id, row_guild_id, updated in sessions:
+            lines.append(
+                f"User: {user_link(self._cached_user_or_id(user_id))}  |  "
+                f"Scope: {scope_text(self._cached_guild_or_id(row_guild_id))}  |  "
+                f"Last Updated: {self._format_updated_at(updated)}"
+            )
         await ctx.respond(
             "Saved REPL sessions:\n" + "\n".join(lines),
             ephemeral=True,
@@ -752,7 +722,8 @@ class REPLCog(commands.Cog):
         """Delete a saved REPL session for a specific user and scope."""
         delete_repl_session(user_id, guild_id)
         await ctx.respond(
-            f'Deleted saved REPL session for {self._user_link(user_id)} in {self._scope_text(guild_id)}.',
+            f'Deleted saved REPL session for '
+            f'{user_scope_text(self._cached_user_or_id(user_id), self._cached_guild_or_id(guild_id))}.',
             ephemeral=True,
             allowed_mentions=discord.AllowedMentions.none(),
         )
@@ -779,10 +750,10 @@ class REPLCog(commands.Cog):
     )
     async def list_session_vars(self, ctx: discord.ApplicationContext, hide: bool = True, values: bool = False, saved: bool = False) -> None:
         """List variables currently defined in the caller's in-memory or saved REPL session."""
-        id_tuple = (ctx.author.id, ctx.guild_id)
+        session_key = (ctx.author.id, ctx.guild_id)
 
-        active_session = self.active_sessions.get(id_tuple, None)
-        loaded_session = load_repl_session(*id_tuple) if saved or not active_session else None
+        active_session = self.active_sessions.get(session_key)
+        loaded_session = load_repl_session(*session_key) if saved or not active_session else None
 
         sections: list[str] = []
         if active_session is not None:
@@ -827,20 +798,31 @@ async def _execute_code(
         return response.result, response.output.rstrip(), files
 
     loop = asyncio.get_running_loop()
-    id_tuple = user_id, guild_id = message.author.id, message.guild.id if message.guild else None
+    user_id = message.author.id
+    guild_id = message.guild.id if message.guild else None
+    session_key = (user_id, guild_id)
 
-    lock = self.session_locks.setdefault(id_tuple, asyncio.Lock())
+    lock = self.session_locks.setdefault(session_key, asyncio.Lock())
     await message.channel.trigger_typing()
     async with lock:
         try:
             code_preview = code if len(code) <= 60 else code[:57] + "..."
-            print(f"Executing code for {self._user_text(user_id)} in {self._scope_text(guild_id)}: {code_preview!r}")
+            _LOGGER.debug(
+                "Executing code for %s: %r",
+                user_scope_text(message.author, message.guild),
+                code_preview,
+            )
             result, stdout, files = await loop.run_in_executor(None, _exec)
         except Exception as e:
-            print(f"Error during execution: {e}")
             await _add_reaction(self, message, "❌")
-            error_msg = f"Error executing code in {self._scope_text(guild_id)}: {e}"
-            logging.error(error_msg)
+            error_msg = (
+                f"Error executing code in "
+                f"{scope_text(message.guild)}: {e}"
+            )
+            _LOGGER.exception(
+                "Error executing code for %s",
+                user_scope_text(message.author, message.guild),
+            )
             await message.channel.send(f"`{error_msg}`", reference=message)
             return
 
@@ -908,5 +890,5 @@ async def _add_reaction(self, message: discord.Message, emoji: str) -> None:
         raise RuntimeError(f"Reaction request failed ({response.status}): {body}")
 
 
-def setup(bot: commands.Bot):
+def setup(bot: commands.Bot) -> None:
     bot.add_cog(REPLCog(bot))
