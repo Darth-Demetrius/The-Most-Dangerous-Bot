@@ -21,7 +21,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from bot.logger import configure_process_logging
-from defines.link_text import user_scope_text
+from repl_helpers.link_text import user_scope_text
 
 
 configure_process_logging(PROJECT_ROOT)
@@ -38,6 +38,7 @@ bot = commands.Bot(command_prefix='/', intents=intents)
 
 cogs_list: list[str] = [
     "cogs.bot_repl",
+    "cogs.bot_repl_admin",
     "cogs.bot_db",
 ]
 
@@ -190,7 +191,7 @@ def _build_help_text() -> str:
         help_text = getattr(cog, "HELP_TEXT", "")
         if help_text:
             sections.append(help_text)
-    return "\n".join(sections)
+    return "\n\n".join(sections)
 
 
 @bot.slash_command(

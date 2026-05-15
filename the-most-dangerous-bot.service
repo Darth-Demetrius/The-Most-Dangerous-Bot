@@ -1,1 +1,15 @@
-/home/jacobk/.config/systemd/user/the-most-dangerous-bot.service
+[Unit]
+Description=The Most Dangerous Bot (Discord)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/disks/Storage/Code Workspaces/The-Most-Dangerous-Bot
+ExecStartPre=-/usr/bin/pkill -f "python -u bot/main.py"
+ExecStart="/disks/Storage/Code Workspaces/The-Most-Dangerous-Bot/.venv/bin/python" -u bot/main.py
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target

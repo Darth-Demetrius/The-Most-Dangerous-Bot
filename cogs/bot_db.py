@@ -16,12 +16,12 @@ from collections.abc import Iterable
 import discord
 from discord.ext import commands
 
-from defines.link_text import (
+from repl_helpers.link_text import (
     role_scope_text,
     scope_text,
     user_scope_text,
 )
-from defines.user_session import UserSession
+from repl_helpers.user_session import UserSession
 from respy_repl import Permissions
 
 _DB_PATH: str | None = None

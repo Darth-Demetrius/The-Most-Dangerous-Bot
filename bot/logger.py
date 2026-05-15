@@ -15,6 +15,9 @@ LOG_TIMESTAMP_PATTERN = re.compile(r"^.+-(?P<stamp>\d{8}-\d{6})(?:-\d+)?$")
 ARCHIVE_AGE_HOURS = 24
 MAX_TOP_LEVEL_TIMESTAMPED_LOGS = 5
 
+USER_EXCEPTION: int = 35
+logging.addLevelName(USER_EXCEPTION, "USER_EXCEPTION")
+
 
 class _MirrorStream:
     """Tee writes to a terminal stream and a log file simultaneously.
@@ -56,7 +59,7 @@ class _SystemLogFilter(logging.Filter):
     """
 
     def filter(self, record: logging.LogRecord) -> bool:
-        if getattr(record, "user_code_error", False):
+        if record.levelno == USER_EXCEPTION:
             return False
         if record.levelno >= logging.ERROR:
             return True
@@ -240,15 +243,16 @@ def _prune_excess_top_level_logs(
 
 
 def configure_process_logging(project_root: Path) -> None:
-    """Configure runtime and discord logging.
+    """Configure runtime, discord, and user-exception logging.
 
-    At startup any prior ``bot.log`` / ``discord.log`` that is non-empty is
-    rolled to timestamped files named with the current time. Existing ``bot``
-    logs older than 24 hours are moved into ``logs/archive`` and compressed by
-    month (``YYYY-MM.zip``), while old ``discord`` logs are deleted instead of
-    archived. Each log family keeps at most five rolled top-level log files.
-    Empty files are silently discarded. Fresh ``bot.log`` and ``discord.log``
-    are always created for the current session.
+    At startup any prior ``bot.log`` / ``discord.log`` / ``user_errors.log``
+    that is non-empty is rolled to timestamped files named with the current
+    time. Existing ``bot`` logs older than 24 hours are moved into
+    ``logs/archive`` and compressed by month (``YYYY-MM.zip``). Old
+    ``discord`` and ``user_errors`` logs are deleted instead of archived.
+    Each log family keeps at most five rolled top-level log files. Empty
+    files are silently discarded. Fresh log files are always created for
+    the current session.
 
     The ``discord`` logger is configured directly here because py-cord 2.x
     ignores the ``log_handler`` constructor parameter on ``commands.Bot``.
@@ -261,14 +265,18 @@ def configure_process_logging(project_root: Path) -> None:
 
     runtime_log_path = log_dir / "bot.log"
     discord_log_path = log_dir / "discord.log"
+    user_errors_log_path = log_dir / "user_errors.log"
     archive_dir = log_dir / "archive"
 
     _rollover_if_nonempty(runtime_log_path)
     _rollover_if_nonempty(discord_log_path)
+    _rollover_if_nonempty(user_errors_log_path)
     _prune_stale_logs(log_dir, archive_dir, "bot", archive=True)
     _prune_stale_logs(log_dir, archive_dir, "discord", archive=False)
+    _prune_stale_logs(log_dir, archive_dir, "user_errors", archive=False)
     _prune_excess_top_level_logs(log_dir, archive_dir, "bot", archive=True)
     _prune_excess_top_level_logs(log_dir, archive_dir, "discord", archive=False)
+    _prune_excess_top_level_logs(log_dir, archive_dir, "user_errors", archive=False)
     _compress_monthly_logs(archive_dir)
 
     # Keep process streams connected to terminal/systemd journal.
@@ -294,6 +302,14 @@ def configure_process_logging(project_root: Path) -> None:
         logging.Formatter("%(asctime)s:%(levelname)s:%(name)s: %(message)s")
     )
     root_logger.addHandler(system_handler)
+
+    user_errors_handler = logging.FileHandler(user_errors_log_path, encoding="utf-8", mode="w")
+    user_errors_handler.setLevel(USER_EXCEPTION)
+    user_errors_handler.addFilter(lambda r: r.levelno == USER_EXCEPTION)
+    user_errors_handler.setFormatter(
+        logging.Formatter("%(asctime)s:%(name)s: %(message)s")
+    )
+    root_logger.addHandler(user_errors_handler)
 
     # py-cord 2.x ignores the log_handler constructor parameter, so we attach
     # the discord.log FileHandler directly and stop propagation to root.
